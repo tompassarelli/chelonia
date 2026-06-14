@@ -202,6 +202,21 @@
   (str/starts-with? resp "ok:") (println (str "committed via coordinator (v" (subs resp 3) "): " id " " pred " = " rv))
   :else (println (str "REJECTED by coordinator: " resp)))))
 
+(defn cmd-doctor [^String threads-dir ^String log]
+  (let [port (chelonia.rt/coord-port)
+   status (chelonia.rt/coord-status port)
+   up (not (= status "down"))
+   serving (str/includes? status log)
+   log-claims (:claims (fold/fold (chelonia.rt/read-log log)))
+   file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))
+   synced (= (sig-set log-claims) (sig-set file-claims))]
+  (println "chelonia doctor")
+  (if up (do
+  (println (str "  [ok]    coordinator UP on 127.0.0.1:" port))
+  (if serving (println "  [ok]    serving the canonical log") (println (str "  [WARN]  daemon is NOT serving " log " — status: " status)))) (println (str "  [DOWN]  no coordinator on 127.0.0.1:" port " — writes won't serialize. Run `chelonia-up`.")))
+  (if synced (println "  [ok]    files <-> claim log in sync") (println "  [WARN]  files diverge from the log — run `import` to absorb file edits before any `export`"))
+  (if (and up (and serving synced)) (println "  => healthy: tell/untell + warm reads are safe") (println "  => DEGRADED: fix the warnings above"))))
+
 (defn run [args ^String threads-dir ^String log]
   (let [cmd (if (empty? args) "" (first args))]
   (cond
@@ -214,13 +229,14 @@
   (= cmd "agenda") (cmd-agenda log)
   (= cmd "plate") (cmd-plate log)
   (= cmd "audit") (cmd-audit log)
+  (= cmd "doctor") (cmd-doctor threads-dir log)
   (= cmd "validate") (cmd-validate log)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | doctor | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

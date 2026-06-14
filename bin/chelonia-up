@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Ensure the Chelonia coordinator daemon is running — the "revive" half of the
+# doctor handshake (analogous to `beagle-doctor --revive`). Idempotent: if a
+# daemon is already up it's a no-op; otherwise it starts one (detached) on the
+# canonical log and waits until it answers.
+#
+#   CHELONIA_PORT / CHELONIA_LOG select the port + log (default 7977, ./claims.log).
+HERE="$(cd "$(dirname "$0")" && pwd)"
+export CHELONIA_PORT="${CHELONIA_PORT:-7977}"
+LOG="${CHELONIA_LOG:-$PWD/claims.log}"
+
+if "$HERE/chelonia" doctor 2>/dev/null | grep -q 'coordinator UP'; then
+  echo "coordinator already up on :$CHELONIA_PORT"
+  exit 0
+fi
+
+echo "starting coordinator on :$CHELONIA_PORT  (log: $LOG)"
+nohup "$HERE/chelonia-daemon" "$CHELONIA_PORT" "$LOG" >"/tmp/chelonia-daemon-$CHELONIA_PORT.log" 2>&1 &
+disown 2>/dev/null || true
+
+for _ in $(seq 40); do
+  if "$HERE/chelonia" doctor 2>/dev/null | grep -q 'coordinator UP'; then
+    echo "coordinator up on :$CHELONIA_PORT"
+    exit 0
+  fi
+  sleep 0.25
+done
+echo "ERROR: daemon did not come up — see /tmp/chelonia-daemon-$CHELONIA_PORT.log" >&2
+exit 1

@@ -106,3 +106,8 @@
 (defn coord-retract [port te pred value base] (coord-write :retract port te pred value base))
 
 (defn coord-port [] (if-let [p (System/getenv "CHELONIA_PORT")] (Integer/parseInt p) 7977))
+
+(defn coord-status [port]
+  (try (let [r (coord-rt port {:op :status})]
+         (str "up|" (:version r) "|" (:claims r) "|" (:log r)))
+       (catch Exception _ "down")))

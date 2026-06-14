@@ -140,6 +140,7 @@
     :blocked  {:blocked (proj/blocked (:index @state))}
     :leverage {:leverage (lev-top (:index @state))}
     :validate {:violations (all-violations (:index @state))}
+    :status   {:version (:version @state) :claims (count (:claims @state)) :log @log-path}
     {:error "unknown op"}))
 
 ;; ---- socket server ----
