@@ -37,6 +37,7 @@
 
 (defrecord LevItem [te :- String score :- Int])
 (defrecord NextItem [te :- String score :- Int])
+(defrecord AgendaItem [te :- String do_on :- String])
 
 ;; --- commands ---------------------------------------------------------------
 
@@ -149,6 +150,30 @@
       (println (str "  [" (:score it) "] " (short-id (:te it)) "  "
                     (trunc (title-of idx (:te it)) 50))))))
 
+;; Calendar projection: bucket non-terminal threads with a do_on into
+;; overdue / today / upcoming (the deadline view; ISO dates sort lexically).
+(defn cmd-agenda [log :- String] :- Nil
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+        today (chelonia.rt/today-iso)
+        cands (filterv (fn [te :- String] :- Bool
+                         (and (not (k/terminal-i? idx te)) (some? (k/one-i idx te "do_on"))))
+                       (k/thread-ids-i idx))
+        items (mapv (fn [te :- String] :- AgendaItem
+                      (->AgendaItem te (let [d (k/one-i idx te "do_on")] (if (some? d) d ""))))
+                    cands)
+        overdue (vec (sort-by (fn [it :- AgendaItem] :- String (:do_on it))
+                              (filterv (fn [it :- AgendaItem] :- Bool (chelonia.rt/str-lt? (:do_on it) today)) items)))
+        todayb (filterv (fn [it :- AgendaItem] :- Bool (= (:do_on it) today)) items)
+        upcoming (vec (sort-by (fn [it :- AgendaItem] :- String (:do_on it))
+                               (filterv (fn [it :- AgendaItem] :- Bool (chelonia.rt/str-lt? today (:do_on it))) items)))]
+    (println (str "AGENDA — " today))
+    (println (str "OVERDUE (" (count overdue) ")"))
+    (doseq [it overdue] (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))
+    (println (str "TODAY (" (count todayb) ")"))
+    (doseq [it todayb] (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))
+    (println (str "UPCOMING (" (count upcoming) ")"))
+    (doseq [it upcoming] (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))))
+
 (defn cmd-plate [log :- String] :- Nil
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
         nonterm (filterv (fn [te :- String] :- Bool (not (k/terminal-i? idx te)))
@@ -190,6 +215,7 @@
       [(= cmd "blocked")  (cmd-blocked log)]
       [(= cmd "leverage") (cmd-leverage log)]
       [(= cmd "next")     (cmd-next log)]
+      [(= cmd "agenda")   (cmd-agenda log)]
       [(= cmd "plate")    (cmd-plate log)]
       [(= cmd "audit")    (cmd-audit log)]
       [(= cmd "validate") (cmd-validate log)]
@@ -198,7 +224,7 @@
        (if (>= (count args) 4)
          (cmd-set log (nth args 1) (nth args 2) (nth args 3))
          (println "usage: set <id> <pred> <value>"))]
-      [:else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | plate | audit | validate | show <id> | set <id> <pred> <value>")])))
+      [:else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | validate | show <id> | set <id> <pred> <value>")])))
 
 (defn -main [& args] :- Nil
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

@@ -31,6 +31,12 @@
 
 (defn nextitem-score [r] (:score r))
 
+(defrecord AgendaItem [te do_on])
+
+(defn agendaitem-te [r] (:te r))
+
+(defn agendaitem-do_on [r] (:do_on r))
+
 (defn cmd-import [^String threads-dir ^String log]
   (let [as (imp/load-corpus threads-dir)]
   (chelonia.rt/write-log log as)
@@ -114,6 +120,26 @@
   (doseq [it ranked]
   (println (str "  [" (:score it) "] " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 50))))))
 
+(defn cmd-agenda [^String log]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   today (chelonia.rt/today-iso)
+   cands (filterv (fn [te] (and (not (k/terminal-i? idx te)) (some? (k/one-i idx te "do_on")))) (k/thread-ids-i idx))
+   items (mapv (fn [te] (->AgendaItem te (let [d (k/one-i idx te "do_on")]
+  (if (some? d) d "")))) cands)
+   overdue (vec (sort-by (fn [it] (:do_on it)) (filterv (fn [it] (chelonia.rt/str-lt? (:do_on it) today)) items)))
+   todayb (filterv (fn [it] (= (:do_on it) today)) items)
+   upcoming (vec (sort-by (fn [it] (:do_on it)) (filterv (fn [it] (chelonia.rt/str-lt? today (:do_on it))) items)))]
+  (println (str "AGENDA — " today))
+  (println (str "OVERDUE (" (count overdue) ")"))
+  (doseq [it overdue]
+  (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))
+  (println (str "TODAY (" (count todayb) ")"))
+  (doseq [it todayb]
+  (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))
+  (println (str "UPCOMING (" (count upcoming) ")"))
+  (doseq [it upcoming]
+  (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))))
+
 (defn cmd-plate [^String log]
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
    nonterm (filterv (fn [te] (not (k/terminal-i? idx te))) (k/thread-ids-i idx))]
@@ -145,12 +171,13 @@
   (= cmd "blocked") (cmd-blocked log)
   (= cmd "leverage") (cmd-leverage log)
   (= cmd "next") (cmd-next log)
+  (= cmd "agenda") (cmd-agenda log)
   (= cmd "plate") (cmd-plate log)
   (= cmd "audit") (cmd-audit log)
   (= cmd "validate") (cmd-validate log)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
-  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | plate | audit | validate | show <id> | set <id> <pred> <value>"))))
+  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | validate | show <id> | set <id> <pred> <value>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

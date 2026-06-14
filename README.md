@@ -65,8 +65,10 @@ bin/chelonia ready       # actionable now
 bin/chelonia blocked     # waiting, and on what
 bin/chelonia leverage    # highest-impact threads to finish
 bin/chelonia next        # ranked suggestion
+bin/chelonia agenda      # deadline view (overdue / today / upcoming)
 bin/chelonia show <id>   # a thread's claims
 bin/chelonia validate    # obligation / consistency check
+bin/chelonia audit       # entity drift: near-dup tags, repo path collisions
 bin/chelonia export DIR  # claims.log -> markdown (faithful inverse of import)
 ```
 
