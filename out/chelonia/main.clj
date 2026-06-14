@@ -5,6 +5,7 @@
             [chelonia.projections :as proj]
             [chelonia.import :as imp]
             [chelonia.export :as exp]
+            [chelonia.audit :as audit]
             [clojure.string :as str]
             [chelonia.rt :as rt]))
 
@@ -42,6 +43,20 @@
   (doseq [te tes]
   (chelonia.rt/spit-file (str out-dir "/" (exp/thread-filename idx te)) (exp/thread-md idx te)))
   (println (str "exported " (count tes) " threads -> " out-dir))))
+
+(defn cmd-audit [^String log]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   td (audit/tag-drift idx)
+   rd (audit/repo-drift idx)
+   lt (audit/long-tail-tags idx)]
+  (println (str "TAG DRIFT — " (count td) " normalized-collision group(s):"))
+  (doseq [g td]
+  (println (str "  " (:norm g) ": " (str/join ", " (mapv (fn [f] (subs f 4)) (:forms g))))))
+  (println (str "REPO DRIFT — " (count rd) " group(s):"))
+  (doseq [g rd]
+  (println (str "  " (:norm g) ": " (str/join ", " (mapv (fn [f] (subs f 5)) (:forms g))))))
+  (println (str "LONG-TAIL TAGS (used once) — " (count lt) ":"))
+  (println (str "  " (str/join " " (mapv (fn [t] (subs t 4)) lt))))))
 
 (defn cmd-ready [^String log]
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
@@ -131,10 +146,11 @@
   (= cmd "leverage") (cmd-leverage log)
   (= cmd "next") (cmd-next log)
   (= cmd "plate") (cmd-plate log)
+  (= cmd "audit") (cmd-audit log)
   (= cmd "validate") (cmd-validate log)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
-  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | plate | validate | show <id> | set <id> <pred> <value>"))))
+  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | plate | audit | validate | show <id> | set <id> <pred> <value>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

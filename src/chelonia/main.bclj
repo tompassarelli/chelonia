@@ -10,6 +10,7 @@
 (require chelonia.projections :as proj)
 (require chelonia.import :as imp)
 (require chelonia.export :as exp)
+(require chelonia.audit :as audit)
 (require clojure.string :as str)
 (require chelonia.rt)   ; load the clj runtime the externs below bind to
 
@@ -54,6 +55,23 @@
       (chelonia.rt/spit-file (str out-dir "/" (exp/thread-filename idx te))
                              (exp/thread-md idx te)))
     (println (str "exported " (count tes) " threads -> " out-dir))))
+
+;; Entity-drift audit: near-duplicate tags / repo path-form collisions / long-tail.
+(defn cmd-audit [log :- String] :- Nil
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+        td (audit/tag-drift idx)
+        rd (audit/repo-drift idx)
+        lt (audit/long-tail-tags idx)]
+    (println (str "TAG DRIFT — " (count td) " normalized-collision group(s):"))
+    (doseq [g td]
+      (println (str "  " (:norm g) ": "
+                    (str/join ", " (mapv (fn [f :- String] :- String (subs f 4)) (:forms g))))))
+    (println (str "REPO DRIFT — " (count rd) " group(s):"))
+    (doseq [g rd]
+      (println (str "  " (:norm g) ": "
+                    (str/join ", " (mapv (fn [f :- String] :- String (subs f 5)) (:forms g))))))
+    (println (str "LONG-TAIL TAGS (used once) — " (count lt) ":"))
+    (println (str "  " (str/join " " (mapv (fn [t :- String] :- String (subs t 4)) lt))))))
 
 (defn cmd-ready [log :- String] :- Nil
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
@@ -173,13 +191,14 @@
       [(= cmd "leverage") (cmd-leverage log)]
       [(= cmd "next")     (cmd-next log)]
       [(= cmd "plate")    (cmd-plate log)]
+      [(= cmd "audit")    (cmd-audit log)]
       [(= cmd "validate") (cmd-validate log)]
       [(= cmd "show")     (cmd-show log (if (> (count args) 1) (nth args 1) ""))]
       [(= cmd "set")
        (if (>= (count args) 4)
          (cmd-set log (nth args 1) (nth args 2) (nth args 3))
          (println "usage: set <id> <pred> <value>"))]
-      [:else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | plate | validate | show <id> | set <id> <pred> <value>")])))
+      [:else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | plate | audit | validate | show <id> | set <id> <pred> <value>")])))
 
 (defn -main [& args] :- Nil
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))
