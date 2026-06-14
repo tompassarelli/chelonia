@@ -88,10 +88,9 @@
   (println (str "  unblocks " (:score it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 46))))))
 
 (defn cmd-validate [^String log]
-  (let [f (fold/fold (chelonia.rt/read-log log))
-   claims (:claims f)
-   problems (reduce (fn [acc te] (reduce (fn [a v] (conj a (str (short-id te) ": " v))) acc (k/violations claims te))) [] (k/thread-ids claims))]
-  (if (empty? problems) (println (str "OK — " (count (k/thread-ids claims)) " threads, no violations.")) (do
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   problems (reduce (fn [acc te] (reduce (fn [a v] (conj a (str (short-id te) ": " v))) acc (k/violations-i idx te))) [] (k/thread-ids-i idx))]
+  (if (empty? problems) (println (str "OK — " (count (k/thread-ids-i idx)) " threads, no violations.")) (do
   (doseq [p problems]
   (println (str "  " p)))
   (println (str "\n" (count problems) " violation(s)."))))))

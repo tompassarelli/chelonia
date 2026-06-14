@@ -104,17 +104,16 @@
                     "  " (trunc (title-of idx (:te it)) 46))))))
 
 (defn cmd-validate [log :- String] :- Nil
-  (let [f (fold/fold (chelonia.rt/read-log log))
-        claims (:claims f)
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
         problems (reduce
                   (fn [acc :- (Vec String) te :- String] :- (Vec String)
                     (reduce (fn [a :- (Vec String) v :- String] :- (Vec String)
                               (conj a (str (short-id te) ": " v)))
-                            acc (k/violations claims te)))
+                            acc (k/violations-i idx te)))
                   []
-                  (k/thread-ids claims))]
+                  (k/thread-ids-i idx))]
     (if (empty? problems)
-      (println (str "OK — " (count (k/thread-ids claims)) " threads, no violations."))
+      (println (str "OK — " (count (k/thread-ids-i idx)) " threads, no violations."))
       (do (doseq [p problems] (println (str "  " p)))
           (println (str "\n" (count problems) " violation(s)."))))))
 

@@ -11,6 +11,10 @@
   (and (>= n 2) (str/starts-with? v "'") (str/ends-with? v "'")) (str/replace (subs v 1 (- n 1)) "''" "'")
   :else v)))
 
+(defn- ^String strip-comment [^String s]
+  (let [i (chelonia.rt/str-index-of s " #")]
+  (if (some? i) (str/trim (subs s 0 i)) s)))
+
 (defn parse-flat-fm [^String fm]
   (let [lines (chelonia.rt/split-on fm "\n")]
   (loop [i 0
@@ -25,7 +29,7 @@
   (cond
   (= v "") (let [items (loop [j (+ i 1)
    out []]
-  (if (and (< j (count lines)) (str/starts-with? (nth lines j) "  - ")) (recur (+ j 1) (conj out (unquote-scalar (str/trim (subs (nth lines j) 4))))) out))]
+  (if (and (< j (count lines)) (str/starts-with? (nth lines j) "  - ")) (recur (+ j 1) (conj out (unquote-scalar (strip-comment (str/trim (subs (nth lines j) 4)))))) out))]
   (recur (+ i 1) (assoc acc kk items)))
   (and (str/starts-with? v "[") (str/ends-with? v "]")) (recur (+ i 1) (assoc acc kk (mapv (fn [s] (unquote-scalar s)) (chelonia.rt/split-comma (subs v 1 (- (count v) 1))))))
   :else (recur (+ i 1) (assoc acc kk (unquote-scalar v)))))))))))))
@@ -85,8 +89,12 @@
    c14 (add-multi csl te "depends_on" "thread:" (fm-list m "depends_on"))
    c15 (add-multi c14 te "tag" "tag:" (fm-list m "tags"))
    c16 (add-multi c15 te "repo" "repo:" (fm-list m "repo"))
-   c17 (add-multi c16 te "proposed_by" "person:" (fm-list m "proposed_by"))]
-  c17))))
+   c17 (add-multi c16 te "proposed_by" "person:" (fm-list m "proposed_by"))
+   c18 (add-scalar c17 te "superseded_by" (prefixed "thread:" (fm-opt m "superseded_by")))
+   c19 (add-multi c18 te "clarifies" "thread:" (fm-list m "clarifies"))
+   c20 (add-multi c19 te "amends" "thread:" (fm-list m "amends"))
+   c21 (add-scalar c20 te "canceled_reason" (fm-opt m "canceled_reason"))]
+  c21))))
 
 (defn- person-name-claims [claims]
   (let [persons (loop [cs claims

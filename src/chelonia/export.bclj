@@ -75,8 +75,12 @@
         a14 (add-line a13 (multi-block idx te "repo" "repo" "repo:"))
         a15 (add-line a14 (scalar-line idx te "part_of" "part_of" "thread:"))
         a16 (add-line a15 (multi-block idx te "depends_on" "depends_on" "thread:"))
-        a17 (add-line a16 (multi-block idx te "tags" "tag" "tag:"))]
-    (str/join "\n" a17)))
+        a17 (add-line a16 (scalar-line idx te "superseded_by" "superseded_by" "thread:"))
+        a18 (add-line a17 (multi-block idx te "clarifies" "clarifies" "thread:"))
+        a19 (add-line a18 (multi-block idx te "amends" "amends" "thread:"))
+        a20 (add-line a19 (scalar-line idx te "canceled_reason" "canceled_reason" ""))
+        a21 (add-line a20 (multi-block idx te "tags" "tag" "tag:"))]
+    (str/join "\n" a21)))
 
 ;; --- public: one thread's filename + full markdown --------------------------
 
