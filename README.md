@@ -45,7 +45,9 @@ threads/*.md ──import──▶ claims.log (append-only) ──fold──▶ 
   `(thread:X depends_on thread:Y)`. Import turns each thread's frontmatter into
   claims, interning entities so a person/repo/tag referenced by many threads is
   *one* object (rename once, not in N files). The current state is a fold over the
-  append-only log.
+  append-only log. **`export` is the faithful inverse** — the claim graph
+  regenerates the markdown (verified claim-identical by `roundtrip_test.clj`), so
+  files are a *view* of the claims, not a competing source of truth.
 - The **coordinator** is a single-writer daemon: many agents query and assert
   concurrently over a socket; writes are serialized; and contradictory or
   rule-breaking writes — dependency cycles, dangling references, an `active`
@@ -65,6 +67,7 @@ bin/chelonia leverage    # highest-impact threads to finish
 bin/chelonia next        # ranked suggestion
 bin/chelonia show <id>   # a thread's claims
 bin/chelonia validate    # obligation / consistency check
+bin/chelonia export DIR  # claims.log -> markdown (faithful inverse of import)
 ```
 
 Try it on the bundled `threads/` examples, then point it at your own:
@@ -93,7 +96,8 @@ query layer) builds with `native/build.sh` (needs GraalVM CE + the Clojure CLI).
 ## Tests
 
 ```sh
-bb -cp out coord_test.clj   # C1–C9 adversarial concurrency suite (9/9)
+bb -cp out coord_test.clj       # C1–C9 adversarial concurrency suite (9/9)
+bb -cp out roundtrip_test.clj   # claims<->files round-trip is lossless
 ```
 
 ## License
