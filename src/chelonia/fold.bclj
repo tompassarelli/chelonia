@@ -1,0 +1,43 @@
+#lang beagle/clj
+(ns chelonia.fold
+  "Replay the append-only assertion log into the current claim set + version.
+  Pure projection over assertions; the log bytes are read via chelonia.rt.")
+
+(require chelonia.kernel :as k)
+
+(defrecord Assertion [tx :- Int op :- String l :- String p :- String r :- String])
+
+(defrecord Fold [claims :- (Vec k/Claim) version :- Int])
+
+(defn- max-tx [as :- (Vec Assertion)] :- Int
+  (reduce (fn [m :- Int a :- Assertion] :- Int (if (> (:tx a) m) (:tx a) m)) 0 as))
+
+;; O(n) fold: collapse to the latest assertion per key in one pass (a hash map),
+;; then emit claims. Single-valued predicates key on (l,p) — latest tx wins;
+;; multi-valued key on (l,p,r) — latest op (assert/retract) per triple wins.
+;; (l/p, and multi-valued r's, are clean refs that never contain the separator.)
+(defrecord Latest [tx :- Int op :- String l :- String p :- String r :- String])
+
+(defn- key-of [a :- Assertion] :- String
+  (if (k/single? (:p a))
+    (str (:l a) "" (:p a))
+    (str (:l a) "" (:p a) "" (:r a))))
+
+(defn fold [asserts :- (Vec Assertion)] :- Fold
+  (let [keyed (reduce
+               (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
+                 (let [k (key-of a)
+                       prev (get m k)]
+                   (if (and (some? prev) (> (:tx prev) (:tx a)))
+                     m
+                     (assoc m k (->Latest (:tx a) (:op a) (:l a) (:p a) (:r a))))))
+               {}
+               asserts)
+        claims (reduce
+                (fn [acc :- (Vec k/Claim) v :- Latest] :- (Vec k/Claim)
+                  (if (= (:op v) "assert")
+                    (conj acc (k/->Claim (:l v) (:p v) (:r v)))
+                    acc))
+                []
+                (vec (vals keyed)))]
+    (->Fold claims (max-tx asserts))))

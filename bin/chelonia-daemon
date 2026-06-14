@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Chelonia coordinator daemon — the sole-writer multi-agent service.
+# Loads the append-only claim log, then serves agents over a local socket
+# (query / assert / retract; optimistic base_version + obligation rules).
+#   chelonia-daemon [port] [log]
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+exec bb -cp "$HERE/out" "$HERE/coord.clj" serve "${1:-7977}" "${2:-$HERE/claims.log}"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Chelonia CLI (runs the compiled Clojure on babashka).
+#   chelonia import | ready | blocked | leverage | next | plate | validate | show <id> | set <id> <pred> <val>
+# Defaults to <repo>/threads and <repo>/claims.log; override with
+# CHELONIA_THREADS / CHELONIA_LOG.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+export CHELONIA_THREADS="${CHELONIA_THREADS:-$HERE/threads}"
+export CHELONIA_LOG="${CHELONIA_LOG:-$HERE/claims.log}"
+exec bb -cp "$HERE/out" -m chelonia.main "$@"

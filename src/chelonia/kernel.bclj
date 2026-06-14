@@ -1,0 +1,168 @@
+#lang beagle/clj
+(ns chelonia.kernel
+  "Claim kernel: the (l p r) claim model, query, apply/retract, obligation rules.
+  Ported from the proven Clojure prototype (chelonia/chelonia.clj + coord.clj).
+  Pure logic — host interop (file IO, sockets) lives in chelonia.rt externs.")
+
+(require clojure.string :as str)
+
+;; --- vocabulary --------------------------------------------------------------
+
+(def single-valued :- (Vec String)
+  ["title" "state" "owner" "lead" "driver" "source" "part_of"
+   "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "name" "body"])
+
+(def valid-states :- (Vec String) ["draft" "ready" "active" "done" "canceled"])
+(def terminal-states :- (Vec String) ["done" "canceled"])
+
+(defn vec-contains? [xs :- (Vec String) s :- String] :- Bool
+  (loop [r xs]
+    (if (empty? r)
+      false
+      (if (= (first r) s) true (recur (rest r))))))
+
+(defn single? [p :- String] :- Bool (vec-contains? single-valued p))
+
+;; --- the claim -------------------------------------------------------------
+
+(defrecord Claim [l :- String p :- String r :- String])
+
+(defn claim-eq? [a :- Claim b :- Claim] :- Bool
+  (and (= (:l a) (:l b)) (= (:p a) (:p b)) (= (:r a) (:r b))))
+
+;; --- query -----------------------------------------------------------------
+
+(defn q-lp [claims :- (Vec Claim) l :- String p :- String] :- (Vec Claim)
+  (filterv (fn [c :- Claim] :- Bool (and (= (:l c) l) (= (:p c) p))) claims))
+
+(defn q-by-l [claims :- (Vec Claim) l :- String] :- (Vec Claim)
+  (filterv (fn [c :- Claim] :- Bool (= (:l c) l)) claims))
+
+(defn one [claims :- (Vec Claim) l :- String p :- String] :- String?
+  (let [hits (q-lp claims l p)]
+    (if (empty? hits) nil (:r (first hits)))))
+
+(defn many [claims :- (Vec Claim) l :- String p :- String] :- (Vec String)
+  (mapv (fn [c :- Claim] :- String (:r c)) (q-lp claims l p)))
+
+(defn terminal? [claims :- (Vec Claim) te :- String] :- Bool
+  (let [st (one claims te "state")]
+    (if (some? st) (vec-contains? terminal-states st) false)))
+
+(defn- uniq [xs :- (Vec String)] :- (Vec String)
+  (reduce (fn [acc :- (Vec String) x :- String] :- (Vec String)
+            (if (vec-contains? acc x) acc (conj acc x)))
+          [] xs))
+
+(defn thread-ids [claims :- (Vec Claim)] :- (Vec String)
+  (uniq (filterv (fn [s :- String] :- Bool (str/starts-with? s "thread:"))
+                 (mapv (fn [c :- Claim] :- String (:l c)) claims))))
+
+;; --- apply / retract -------------------------------------------------------
+
+(defn- drop-lp [claims :- (Vec Claim) l :- String p :- String] :- (Vec Claim)
+  (filterv (fn [x :- Claim] :- Bool (not (and (= (:l x) l) (= (:p x) p)))) claims))
+
+(defn- has-claim? [claims :- (Vec Claim) c :- Claim] :- Bool
+  (loop [r claims]
+    (if (empty? r)
+      false
+      (if (claim-eq? (first r) c) true (recur (rest r))))))
+
+(defn apply-assert [claims :- (Vec Claim) c :- Claim] :- (Vec Claim)
+  (if (single? (:p c))
+    (conj (drop-lp claims (:l c) (:p c)) c)
+    (if (has-claim? claims c) claims (conj claims c))))
+
+(defn apply-retract [claims :- (Vec Claim) c :- Claim] :- (Vec Claim)
+  (if (single? (:p c))
+    (drop-lp claims (:l c) (:p c))
+    (filterv (fn [x :- Claim] :- Bool (not (claim-eq? x c))) claims)))
+
+;; --- cycles ----------------------------------------------------------------
+
+(defn cycle? [claims :- (Vec Claim) pred :- String te :- String] :- Bool
+  (let [succ (fn [x :- String] :- (Vec String)
+               (if (= pred "part_of")
+                 (let [pp (one claims x "part_of")] (if (some? pp) [pp] []))
+                 (many claims x "depends_on")))]
+    (loop [front (succ te)
+           seen []]
+      (cond
+        [(empty? front) false]
+        [(= (first front) te) true]
+        [(vec-contains? seen (first front)) (recur (vec (rest front)) seen)]
+        [:else (recur (vec (concat (rest front) (succ (first front))))
+                      (conj seen (first front)))]))))
+
+;; --- obligation rules ------------------------------------------------------
+
+(defn violations [claims :- (Vec Claim) te :- String] :- (Vec String)
+  (let [st (one claims te "state")
+        ids (thread-ids claims)
+        v1 (if (and (some? st) (not (vec-contains? valid-states st)))
+             [(str "invalid state '" st "'")]
+             [])
+        v2 (reduce
+            (fn [acc :- (Vec String) d :- String] :- (Vec String)
+              (let [a (if (not (vec-contains? ids d))
+                        (conj acc (str "depends_on references missing entity " d))
+                        acc)]
+                (if (= "canceled" (one claims d "state"))
+                  (conj a (str "depends_on points at canceled " d))
+                  a)))
+            v1
+            (many claims te "depends_on"))
+        pa (one claims te "part_of")
+        v3 (if (and (some? pa) (not (vec-contains? ids pa)))
+             (conj v2 (str "part_of references missing entity " pa))
+             v2)
+        v4 (if (and (= st "active") (nil? (one claims te "driver")))
+             (conj v3 "active thread has no driver")
+             v3)
+        v5 (if (cycle? claims "depends_on" te) (conj v4 "depends_on cycle") v4)
+        v6 (if (cycle? claims "part_of" te) (conj v5 "part_of cycle") v5)]
+    v6))
+
+;; --- indexed query layer (O(1) lookups, built once) -------------------------
+;; The (Vec Claim) API above is O(n) per lookup — fine for write-time validation,
+;; fatal for whole-corpus projections. Build these once per read and the
+;; projections become O(threads), not O(threads * claims).
+
+(defrecord Index
+  [single :- (Map String String)        ; "lp" -> r           (single-valued one)
+   bypred :- (Map String (Vec String))  ; "lp" -> [r ...]      (many)
+   subjects :- (Vec String)             ; distinct subject l's
+   revdep :- (Map String (Vec String))]); r -> [l ...] for depends_on (reverse edges)
+
+(defn build-index [claims :- (Vec Claim)] :- Index
+  (let [single (reduce (fn [m :- (Map String String) c :- Claim] :- (Map String String)
+                         (assoc m (str (:l c) "" (:p c)) (:r c)))
+                       {} claims)
+        bypred (reduce (fn [m :- (Map String (Vec String)) c :- Claim] :- (Map String (Vec String))
+                         (let [kk (str (:l c) "" (:p c))]
+                           (assoc m kk (conj (get m kk []) (:r c)))))
+                       {} claims)
+        subjects (uniq (mapv (fn [c :- Claim] :- String (:l c)) claims))
+        revdep (reduce (fn [m :- (Map String (Vec String)) c :- Claim] :- (Map String (Vec String))
+                         (if (= (:p c) "depends_on")
+                           (assoc m (:r c) (conj (get m (:r c) []) (:l c)))
+                           m))
+                       {} claims)]
+    (->Index single bypred subjects revdep)))
+
+(defn one-i [idx :- Index l :- String p :- String] :- String?
+  (get (:single idx) (str l "" p)))
+
+(defn many-i [idx :- Index l :- String p :- String] :- (Vec String)
+  (get (:bypred idx) (str l "" p) []))
+
+(defn thread-ids-i [idx :- Index] :- (Vec String)
+  (filterv (fn [s :- String] :- Bool (str/starts-with? s "thread:")) (:subjects idx)))
+
+(defn terminal-i? [idx :- Index te :- String] :- Bool
+  (let [st (one-i idx te "state")]
+    (if (some? st) (vec-contains? terminal-states st) false)))
+
+(defn dependents-i [idx :- Index te :- String] :- (Vec String)
+  (get (:revdep idx) te []))
