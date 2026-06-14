@@ -11,7 +11,7 @@
 (def single-valued :- (Vec String)
   ["title" "state" "owner" "lead" "driver" "source" "part_of"
    "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "name" "body"
-   "created_by" "slug" "superseded_by" "canceled_reason"])
+   "created_by" "slug" "superseded_by" "canceled_reason" "merged_into"])
 
 (def valid-states :- (Vec String) ["draft" "ready" "active" "done" "canceled"])
 (def terminal-states :- (Vec String) ["done" "canceled"])

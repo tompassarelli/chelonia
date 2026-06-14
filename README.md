@@ -69,6 +69,7 @@ bin/chelonia agenda      # deadline view (overdue / today / upcoming)
 bin/chelonia show <id>   # a thread's claims
 bin/chelonia validate    # obligation / consistency check
 bin/chelonia audit       # entity drift: near-dup tags, repo path collisions
+bin/chelonia merge A B   # consolidate entity A into B (fixes what audit finds)
 bin/chelonia export DIR  # claims.log -> markdown (faithful inverse of import)
 ```
 

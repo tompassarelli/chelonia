@@ -161,6 +161,21 @@
   (chelonia.rt/append-assertion log (fold/->Assertion (+ (:version f) 1) "assert" te pred rv "cli"))
   (println (str "ok — " id " " pred " = " rv " (v" (+ (:version f) 1) ")"))))))
 
+(defn- claims->assertions [claims ^String frame]
+  (loop [cs claims
+   i 1
+   acc []]
+  (if (empty? cs) acc (let [c (first cs)]
+  (recur (rest cs) (+ i 1) (conj acc (fold/->Assertion i "assert" (:l c) (:p c) (:r c) frame)))))))
+
+(defn cmd-merge [^String log ^String from ^String to]
+  (let [claims (:claims (fold/fold (chelonia.rt/read-log log)))
+   rewritten (mapv (fn [c] (k/->Claim (if (= (:l c) from) to (:l c)) (:p c) (if (= (:r c) from) to (:r c)))) claims)
+   withrec (conj rewritten (k/->Claim from "merged_into" to))
+   deduped (:claims (fold/fold (claims->assertions withrec "merge")))]
+  (chelonia.rt/write-log log (claims->assertions deduped "merge"))
+  (println (str "merged " from " -> " to "  (" (count claims) " claims -> " (count deduped) ")"))))
+
 (defn run [args ^String threads-dir ^String log]
   (let [cmd (if (empty? args) "" (first args))]
   (cond
@@ -176,7 +191,8 @@
   (= cmd "validate") (cmd-validate log)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
-  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | validate | show <id> | set <id> <pred> <value>"))))
+  (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
+  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | validate | show <id> | set <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))
