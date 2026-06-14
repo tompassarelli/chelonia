@@ -77,7 +77,7 @@
    ids (thread-ids claims)
    v1 (if (and (some? st) (not (vec-contains? valid-states st))) [(str "invalid state '" st "'")] [])
    v2 (reduce (fn [acc d] (let [a (if (not (vec-contains? ids d)) (conj acc (str "depends_on references missing entity " d)) acc)]
-  (if (= "canceled" (one claims d "state")) (conj a (str "depends_on points at canceled " d)) a))) v1 (many claims te "depends_on"))
+  (if (and (not (terminal? claims te)) (= "canceled" (one claims d "state"))) (conj a (str "depends_on points at canceled " d)) a))) v1 (many claims te "depends_on"))
    pa (one claims te "part_of")
    v3 (if (and (some? pa) (not (vec-contains? ids pa))) (conj v2 (str "part_of references missing entity " pa)) v2)
    v4 (if (and (= st "active") (nil? (one claims te "driver"))) (conj v3 "active thread has no driver") v3)

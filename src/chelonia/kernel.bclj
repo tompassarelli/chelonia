@@ -109,7 +109,8 @@
               (let [a (if (not (vec-contains? ids d))
                         (conj acc (str "depends_on references missing entity " d))
                         acc)]
-                (if (= "canceled" (one claims d "state"))
+                (if (and (not (terminal? claims te))
+                         (= "canceled" (one claims d "state")))
                   (conj a (str "depends_on points at canceled " d))
                   a)))
             v1
