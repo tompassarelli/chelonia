@@ -6,7 +6,7 @@
 ;;
 ;;   bb chelonia/coord.clj serve [port]     # run the daemon
 ;;   bb chelonia/coord.clj test  [port]     # embedded daemon + N racing clients, assert invariants
-(require '[clojure.string :as str] '[clojure.edn :as edn] '[chelonia.kernel :as ck])
+(require '[clojure.string :as str] '[clojure.edn :as edn] '[chelonia.kernel :as ck] '[chelonia.projections :as proj])
 (import '[java.net ServerSocket Socket InetSocketAddress]
         '[java.io BufferedReader InputStreamReader OutputStreamWriter BufferedWriter])
 
@@ -73,6 +73,9 @@
 (def write-lock (Object.))
 (def log-path (atom "/tmp/chelonia-coord.log"))
 
+;; warm read path: cache the kernel index in memory; rebuild on load + on commit.
+(defn reindex! [] (swap! state assoc :index (ck/build-index (claims->vec (:claims @state)))))
+
 (defn commit!
   "SOLE WRITER. Serialized. Optimistic base_version + obligation rules."
   [te p r base]
@@ -87,6 +90,7 @@
         :else (let [tx (inc version)]
                 (append-line! @log-path {:tx tx :op "assert" :l te :p p :r r :ts "t" :by "coord"})
                 (reset! state {:claims cand :version tx :lastmod (assoc lastmod [te p] tx)})
+                (reindex!)
                 {:ok tx})))))
 
 ;; retract: single-valued clears (l,p); multi-valued removes the (l,p,r) triple.
@@ -110,13 +114,32 @@
         :else (let [tx (inc version)]
                 (append-line! @log-path {:tx tx :op "retract" :l te :p p :r r :ts "t" :by "coord"})
                 (reset! state {:claims cand :version tx :lastmod (assoc lastmod [te p] tx)})
+                (reindex!)
                 {:ok tx})))))
+
+;; warm read projections, served from the cached in-memory index (no file read,
+;; no re-fold, no re-index per query — the cold CLI's ~360ms is gone here).
+(defn- lev-top [idx]
+  (->> (ck/thread-ids-i idx)
+       (remove #(ck/terminal-i? idx %))
+       (map (fn [te] [te (proj/leverage-score idx te)]))
+       (filter #(pos? (second %)))
+       (sort-by (comp - second))
+       (take 10) vec))
+(defn- all-violations [idx]
+  (->> (ck/thread-ids-i idx)
+       (mapcat (fn [te] (map #(str (subs te 7) ": " %) (ck/violations-i idx te))))
+       vec))
 
 (defn handle [req]
   (case (:op req)
-    :version {:version (:version @state)}
-    :assert  (commit! (:te req) (:p req) (:r req) (:base req))
-    :retract (commit-retract! (:te req) (:p req) (:r req) (:base req))
+    :version  {:version (:version @state)}
+    :assert   (commit! (:te req) (:p req) (:r req) (:base req))
+    :retract  (commit-retract! (:te req) (:p req) (:r req) (:base req))
+    :ready    {:ready (proj/ready (:index @state))}
+    :blocked  {:blocked (proj/blocked (:index @state))}
+    :leverage {:leverage (lev-top (:index @state))}
+    :validate {:violations (all-violations (:index @state))}
     {:error "unknown op"}))
 
 ;; ---- socket server ----
@@ -154,6 +177,7 @@
 (defn serve-daemon [port log]
   (reset! log-path log)
   (load-log! log)
+  (reindex!)
   (println (str "coordinator: loaded " (count (:claims @state)) " claims from " log))
   (serve port))
 
