@@ -230,6 +230,11 @@
   (if synced (println "  [ok]    files <-> claim log in sync") (println "  [WARN]  files diverge from the log — run `import` to absorb file edits before any `export`"))
   (if (and up (and serving (and synced fresh))) (println "  => healthy: tell/untell + warm reads are safe") (println "  => DEGRADED: fix the warnings above"))))
 
+(defn cmd-watch []
+  (let [port (chelonia.rt/coord-port)]
+  (println (str "watching coordinator on 127.0.0.1:" port " — Ctrl-C to stop"))
+  (chelonia.rt/coord-watch port)))
+
 (defn run [args ^String threads-dir ^String log]
   (let [cmd (if (empty? args) "" (first args))]
   (cond
@@ -243,13 +248,14 @@
   (= cmd "plate") (cmd-plate log)
   (= cmd "audit") (cmd-audit log)
   (= cmd "doctor") (cmd-doctor threads-dir log)
+  (= cmd "watch") (cmd-watch)
   (= cmd "validate") (cmd-validate log)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | doctor | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "usage: import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | doctor | watch | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

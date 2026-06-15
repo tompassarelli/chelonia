@@ -76,6 +76,20 @@
 ;; warm read path: cache the kernel index in memory; rebuild on load + on commit.
 (defn reindex! [] (swap! state assoc :index (ck/build-index (claims->vec (:claims @state)))))
 
+;; --- pub/sub: push each commit to subscribed agents -------------------------
+;; The worth-stealing bit from agentwire — but as a REACTIVE layer over the
+;; shared graph, not a message bus. The sole writer is the natural broadcast
+;; point; agents `subscribe` and react to changes instead of polling/relaying.
+(def subscribers (atom []))
+(defn- notify-subs! [event]
+  (let [line (str (pr-str event) "\n")]
+    (reset! subscribers
+            (vec (filter (fn [w]
+                           (try (.write ^java.io.BufferedWriter w line)
+                                (.flush ^java.io.BufferedWriter w) true
+                                (catch Exception _ false)))   ; drop dead subscribers
+                         @subscribers)))))
+
 (defn commit!
   "SOLE WRITER. Serialized. Optimistic base_version + obligation rules."
   [te p r base]
@@ -91,6 +105,7 @@
                 (append-line! @log-path {:tx tx :op "assert" :l te :p p :r r :ts "t" :by "coord"})
                 (reset! state {:claims cand :version tx :lastmod (assoc lastmod [te p] tx)})
                 (reindex!)
+                (notify-subs! {:event :commit :version tx :op "assert" :l te :p p :r r})
                 {:ok tx})))))
 
 ;; retract: single-valued clears (l,p); multi-valued removes the (l,p,r) triple.
@@ -115,6 +130,7 @@
                 (append-line! @log-path {:tx tx :op "retract" :l te :p p :r r :ts "t" :by "coord"})
                 (reset! state {:claims cand :version tx :lastmod (assoc lastmod [te p] tx)})
                 (reindex!)
+                (notify-subs! {:event :commit :version tx :op "retract" :l te :p p :r r})
                 {:ok tx})))))
 
 ;; warm read projections, served from the cached in-memory index (no file read,
@@ -152,8 +168,14 @@
     (let [r (BufferedReader. (InputStreamReader. (.getInputStream s)))
           w (BufferedWriter. (OutputStreamWriter. (.getOutputStream s)))]
       (when-let [line (.readLine r)]
-        (let [resp (handle (edn/read-string line))]
-          (.write w (pr-str resp)) (.newLine w) (.flush w))))
+        (let [req (edn/read-string line)]
+          (if (= (:op req) :subscribe)
+            (do                                  ; long-lived: register + stream commits
+              (locking write-lock (swap! subscribers conj w))
+              (.write w (pr-str {:subscribed (:version @state)})) (.newLine w) (.flush w)
+              (loop [] (when (.readLine r) (recur))))   ; hold open until client disconnects
+            (let [resp (handle req)]
+              (.write w (pr-str resp)) (.newLine w) (.flush w))))))
     (finally (.close s))))
 
 (defn serve [port]

@@ -111,3 +111,16 @@
   (try (let [r (coord-rt port {:op :status})]
          (str "up|" (:version r) "|" (:claims r) "|" (:log r)))
        (catch Exception _ "down")))
+
+;; subscribe + stream commit events (one EDN line each) until disconnect
+(defn coord-watch [port]
+  (with-open [s (java.net.Socket.)]
+    (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int port)) 2000)
+    (let [w (io/writer (.getOutputStream s))
+          r (io/reader (.getInputStream s))]
+      (.write w "{:op :subscribe}\n") (.flush w)
+      (loop []
+        (when-let [line (.readLine r)]
+          (println line)
+          (recur)))))
+  nil)
