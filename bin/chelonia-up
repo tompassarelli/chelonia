@@ -8,9 +8,14 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export CHELONIA_PORT="${CHELONIA_PORT:-7977}"
 LOG="${CHELONIA_LOG:-$PWD/claims.log}"
+RESTART=0; [ "$1" = "--restart" ] && RESTART=1
 
-if "$HERE/chelonia" doctor 2>/dev/null | grep -q 'coordinator UP'; then
-  echo "coordinator already up on :$CHELONIA_PORT"
+if [ "$RESTART" = 1 ]; then
+  echo "stopping any coordinator on :$CHELONIA_PORT"
+  fuser -k "$CHELONIA_PORT/tcp" 2>/dev/null || true
+  lsof -ti "tcp:$CHELONIA_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+elif "$HERE/chelonia" doctor 2>/dev/null | grep -q 'coordinator UP'; then
+  echo "coordinator already up on :$CHELONIA_PORT (use \`up --restart\` to reload it)"
   exit 0
 fi
 
