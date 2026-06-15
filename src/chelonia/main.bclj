@@ -299,21 +299,28 @@
         status (chelonia.rt/coord-status port)
         up (not (= status "down"))
         serving (str/includes? status log)
-        log-claims (:claims (fold/fold (chelonia.rt/read-log log)))
+        f (fold/fold (chelonia.rt/read-log log))
+        log-v (:version f)
+        daemon-v (chelonia.rt/coord-version port)
+        fresh (= daemon-v log-v)
         file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))
-        synced (= (sig-set log-claims) (sig-set file-claims))]
+        synced (= (sig-set (:claims f)) (sig-set file-claims))]
     (println "chelonia doctor")
     (if up
       (do
         (println (str "  [ok]    coordinator UP on 127.0.0.1:" port))
         (if serving
           (println "  [ok]    serving the canonical log")
-          (println (str "  [WARN]  daemon is NOT serving " log " — status: " status))))
-      (println (str "  [DOWN]  no coordinator on 127.0.0.1:" port " — writes won't serialize. Run `chelonia-up`.")))
+          (println (str "  [WARN]  daemon is NOT serving " log " — status: " status)))
+        (if fresh
+          (println "  [ok]    daemon state matches the on-disk log")
+          (println (str "  [WARN]  daemon is STALE (loaded v" daemon-v ", log is v" log-v
+                        ") — the log changed out-of-band; restart: kill it + `chelonia up`"))))
+      (println (str "  [DOWN]  no coordinator on 127.0.0.1:" port " — writes won't serialize. Run `chelonia up`.")))
     (if synced
       (println "  [ok]    files <-> claim log in sync")
       (println "  [WARN]  files diverge from the log — run `import` to absorb file edits before any `export`"))
-    (if (and up (and serving synced))
+    (if (and up (and serving (and synced fresh)))
       (println "  => healthy: tell/untell + warm reads are safe")
       (println "  => DEGRADED: fix the warnings above"))))
 
