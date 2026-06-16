@@ -15,8 +15,9 @@
   ["title" "owner" "lead" "driver" "source" "part_of"
    "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "name" "body"
    "created_by" "committed" "outcome" "abandoned" "superseded_by" "merged_into"
-   ;; time-logging: a work session has one of each (session_of/start/end).
-   "session_of" "start_time" "end_time"])
+   ;; time-logging: a work session has one of each (session_of/start/end), and
+   ;; one clockify_id once it's been pushed to Clockify (billing sync state).
+   "session_of" "start_time" "end_time" "clockify_id"])
 
 (defn vec-contains? [xs :- (Vec String) s :- String] :- Bool
   (loop [r xs]

@@ -8,7 +8,7 @@
             [chelonia.import :as imp]
             [chelonia.export :as exp]
             [chelonia.audit :as audit]
-            [chelonia.time :as ctime]
+            [chelonia.clockify :as cf]
             [clojure.string :as str]
             [chelonia.rt :as rt]))
 
@@ -333,6 +333,43 @@
   (println (str "  " (short-id (:te r)) "  est " (:est-h r) "h  actual " (fmt-hm (:act-sec r)) "  " (trunc (title-of idx (:te r)) 38))))
   (if (> (:sample cal) 0) (println (str "\nCALIBRATION — across " (:sample cal) " done thread(s) with both: actuals ran " (:pct cal) "% of estimate" (if (> (:pct cal) 100) " (you under-estimate)" " (you over-estimate)"))) (println "\nCALIBRATION — not enough completed estimate+actual data yet"))))
 
+(defn cmd-clock-sync [^String log]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   dir (chelonia.rt/time-dir)
+   sessions (clk/syncable-sessions idx)
+   port (chelonia.rt/coord-port)]
+  (if (empty? sessions) (println "nothing to sync — no closed, unsynced sessions") (let [ws (cf/default-workspace)]
+  (println (str "syncing " (count sessions) " session(s) to clockify (workspace " ws ")"))
+  (doseq [s sessions]
+  (let [te (session-thread idx s)
+   owner (let [o (k/one-i idx te "owner")]
+  (if (some? o) o "personal"))
+   proj (cf/project-for dir owner)
+   st (k/one-i idx s "start_time")
+   en (k/one-i idx s "end_time")]
+  (cond
+  (nil? proj) (println (str "  – skip " (short-id s) "  (owner '" owner "' unmapped — `clock map " owner " <project-id>`)"))
+  (or (nil? st) (nil? en)) (println (str "  ! skip " (short-id s) "  (missing start/end)"))
+  :else (let [cid (cf/create-entry ws proj st en (title-of idx te))]
+  (if (= cid "") (println (str "  ! " (short-id s) "  (clockify returned no id)")) (do
+  (tell-retry port "assert" s "clockify_id" cid 5)
+  (println (str "  ✓ " (short-id te) "  " st " → " en "  (clockify " cid ")"))))))))
+  (println "done.")))))
+
+(defn- clock-window [^String log prefixes ^String label]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   rs (clk/logged-rows idx prefixes (fn [s] (chelonia.rt/iso-to-seconds s)))
+   total (reduce (fn [m r] (+ m (:act-sec r))) 0 rs)]
+  (println (str "LOGGED " label " — " (fmt-hm total) " across " (count rs) " thread(s)"))
+  (doseq [r rs]
+  (println (str "  " (fmt-hm (:act-sec r)) "  " (short-id (:te r)) "  " (trunc (title-of idx (:te r)) 40))))))
+
+(defn cmd-clock-today [^String log]
+  (clock-window log (conj [] (subs (chelonia.rt/now-iso) 0 10)) "today"))
+
+(defn cmd-clock-week [^String log]
+  (clock-window log (chelonia.rt/this-week-dates) "this week"))
+
 (defn cmd-doctor [^String threads-dir ^String log]
   (let [port (chelonia.rt/coord-port)
    status (chelonia.rt/coord-status port)
@@ -357,24 +394,6 @@
   (println (str "watching coordinator on 127.0.0.1:" port " — Ctrl-C to stop"))
   (chelonia.rt/coord-watch port)))
 
-(defn cmd-time [args]
-  (let [dir (chelonia.rt/time-dir)
-   sub (if (empty? args) "status" (first args))
-   a (vec (rest args))]
-  (cond
-  (= sub "on") (if (>= (count a) 1) (ctime/cmd-on dir (first a) (str/join " " (vec (rest a)))) (println "usage: time on <task> [notes...]"))
-  (= sub "off") (ctime/cmd-off dir (str/join " " a))
-  (= sub "status") (ctime/cmd-status dir)
-  (= sub "log") (if (>= (count a) 3) (ctime/cmd-log dir (nth a 0) (nth a 1) (nth a 2) (str/join " " (vec (rest (rest (rest a)))))) (println "usage: time log <task> <start> <end> [notes...]"))
-  (= sub "today") (ctime/cmd-today dir)
-  (= sub "week") (ctime/cmd-week dir)
-  (= sub "import-org") (if (>= (count a) 2) (ctime/cmd-import-org dir (first a) (nth a 1)) (println "usage: time import-org <org-file> <task>"))
-  (= sub "map") (if (>= (count a) 2) (ctime/cmd-map dir (nth a 0) (nth a 1)) (println "usage: time map <task> <project-id>"))
-  (= sub "sync") (ctime/cmd-sync dir)
-  (= sub "projects") (ctime/cmd-projects)
-  (= sub "workspaces") (ctime/cmd-workspaces)
-  :else (println "usage: time on|off|status|log <task> <start> <end>|today|week|import-org|map|sync|projects|workspaces"))))
-
 (defn run [args ^String threads-dir ^String log]
   (let [cmd (if (empty? args) "" (first args))]
   (cond
@@ -394,18 +413,23 @@
   (= sub "stop") (cmd-clock-stop log)
   (= sub "status") (cmd-clock-status log)
   (= sub "report") (cmd-clock-report log)
-  :else (println "usage: clock start <id> | stop | status | report")))
+  (= sub "today") (cmd-clock-today log)
+  (= sub "week") (cmd-clock-week log)
+  (= sub "sync") (cmd-clock-sync log)
+  (= sub "map") (if (>= (count args) 4) (cf/cmd-map (chelonia.rt/time-dir) (nth args 2) (nth args 3)) (println "usage: clock map <owner> <project-id>"))
+  (= sub "projects") (cf/cmd-projects)
+  (= sub "workspaces") (cf/cmd-workspaces)
+  :else (println "usage: clock start <id> | stop | status | report | today | week | sync | map <owner> <project-id> | projects | workspaces")))
   (= cmd "audit") (cmd-audit log)
   (= cmd "doctor") (cmd-doctor threads-dir log)
   (= cmd "watch") (cmd-watch)
-  (= cmd "time") (cmd-time (vec (rest args)))
   (= cmd "validate") (cmd-validate log)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | needs-review | clock <start|stop|status|report> | audit | doctor | watch | time <sub> | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | needs-review | clock <start|stop|status|report|today|week|sync|map|projects|workspaces> | audit | doctor | watch | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

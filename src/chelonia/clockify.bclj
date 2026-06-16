@@ -1,0 +1,96 @@
+#lang beagle/clj
+(ns chelonia.clockify
+  "Clockify integration — the BILLING projection of claim-native sessions.
+   The canonical time store is the claim graph (chelonia.clock sessions); this
+   module only pushes closed billable sessions outward to Clockify on demand and
+   lists workspaces/projects. The thread-owner -> Clockify-project mapping lives
+   in <time-dir>/projects.json (integration config, not time data). API key from
+   $CLOCKIFY_API_KEY or the file at $CLOCKIFY_SECRET_FILE; nothing baked in.")
+
+(require clojure.string :as str)
+(require chelonia.rt)
+(require chelonia.json :as json)
+
+(declare-extern chelonia.rt/error-exit [String -> Any])
+(declare-extern chelonia.rt/file-exists [String -> Bool])
+(declare-extern chelonia.rt/create-dirs [String -> Nil])
+(declare-extern chelonia.rt/getenv [String -> String?])
+(declare-extern chelonia.rt/http-get [String String -> String])
+(declare-extern chelonia.rt/http-post [String String String -> String])
+
+(declare-extern chelonia.json/parse [String -> Json])
+(declare-extern chelonia.json/to-string [Json -> String])
+(declare-extern chelonia.json/get [Json String -> String?])
+(declare-extern chelonia.json/put [Json String String? -> Json])
+(declare-extern chelonia.json/empty [-> Json])
+(declare-extern chelonia.json/sort-keys [Json -> Json])
+
+;; --- api key + http ---------------------------------------------------------
+(defn- clockify-key [] :- String
+  (let [env-key (chelonia.rt/getenv "CLOCKIFY_API_KEY")
+        secret-file (chelonia.rt/getenv "CLOCKIFY_SECRET_FILE")]
+    (cond
+      [(some? env-key) env-key]
+      [(and (some? secret-file) (chelonia.rt/file-exists secret-file)) (str/trim (slurp secret-file))]
+      [:else (chelonia.rt/error-exit
+              "no clockify key — set CLOCKIFY_API_KEY, or CLOCKIFY_SECRET_FILE to a key file")])))
+
+(defn- clockify-get [path :- String] :- Json
+  (let [body (chelonia.rt/http-get (str "https://api.clockify.me/api/v1" path) (clockify-key))]
+    (if (= body "") (chelonia.json/empty) (chelonia.json/parse body))))
+
+(defn- clockify-post [path :- String body-data :- Json] :- Json
+  (let [body (chelonia.rt/http-post (str "https://api.clockify.me/api/v1" path)
+                               (clockify-key) (chelonia.json/to-string body-data))]
+    (if (= body "") (chelonia.json/empty) (chelonia.json/parse body))))
+
+(defn default-workspace [] :- String
+  (let [env-ws (chelonia.rt/getenv "CLOCKIFY_WORKSPACE_ID")]
+    (if (some? env-ws)
+      env-ws
+      (let [user (clockify-get "/user")
+            ws (chelonia.json/get user "defaultWorkspace")]
+        (if (nil? ws) (chelonia.rt/error-exit "no defaultWorkspace in /user response") ws)))))
+
+;; --- thread-owner -> project mapping (integration config) -------------------
+(defn- projects-path [dir :- String] :- String (str dir "/projects.json"))
+
+(defn- load-projects [dir :- String] :- Json
+  (let [p (projects-path dir)]
+    (if (chelonia.rt/file-exists p) (chelonia.json/parse (slurp p)) (chelonia.json/empty))))
+
+(defn cmd-map [dir :- String owner :- String project-id :- String] :- Nil
+  (let [mapping (load-projects dir)]
+    (chelonia.rt/create-dirs dir)
+    (spit (projects-path dir)
+          (chelonia.json/to-string (chelonia.json/sort-keys (chelonia.json/put mapping owner project-id))))
+    (println (str "mapped owner " owner " → clockify project " project-id))))
+
+(defn project-for [dir :- String owner :- String] :- String?
+  (chelonia.json/get (load-projects dir) owner))
+
+;; --- listing ----------------------------------------------------------------
+(defn cmd-workspaces [] :- Nil
+  (doseq [w (cheshire.core/parse-string
+              (chelonia.rt/http-get "https://api.clockify.me/api/v1/workspaces" (clockify-key)) false)]
+    (println (str (get w "id" "") "  " (get w "name" "")))))
+
+(defn cmd-projects [] :- Nil
+  (let [ws (default-workspace)]
+    (doseq [p (cheshire.core/parse-string
+               (chelonia.rt/http-get (str "https://api.clockify.me/api/v1/workspaces/" ws "/projects?page-size=100") (clockify-key)) false)]
+      (println (str (get p "id" "") "  " (get p "name" ""))))))
+
+;; --- push one session as a Clockify time entry; returns the new entry id -----
+(defn create-entry [ws :- String proj :- String start :- String end :- String desc :- String] :- String
+  (let [resp (clockify-post
+              (str "/workspaces/" ws "/time-entries")
+              (chelonia.json/put
+               (chelonia.json/put
+                (chelonia.json/put
+                 (chelonia.json/put (chelonia.json/empty) "start" (str start "Z"))
+                 "end" (str end "Z"))
+                "description" desc)
+               "projectId" proj))
+        cid (chelonia.json/get resp "id")]
+    (if (nil? cid) "" cid)))

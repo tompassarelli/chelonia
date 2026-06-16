@@ -11,6 +11,7 @@
    never stored, consistent with the no-stored-derived model (D6).")
 
 (require chelonia.kernel :as k)
+(require clojure.string :as str)
 
 ;; the single open session: has session_of + start_time, no end_time.
 (defn running-session [idx :- k/Index] :- String?
@@ -65,3 +66,40 @@
         act-sec (reduce (fn [m :- Int r :- Row] :- Int (+ m (:act-sec r))) 0 done)
         pct (if (> est-sec 0) (quot (* act-sec 100) est-sec) 0)]
     (->Calib pct (count done) est-sec act-sec)))
+
+;; --- clockify sync selection: closed sessions not yet pushed -----------------
+;; A session is syncable iff it is closed (has end_time) and carries no
+;; clockify_id yet. Billability (owner -> project mapping) is resolved by the
+;; caller, which holds the integration config; this stays pure over the graph.
+(defn syncable-sessions [idx :- k/Index] :- (Vec String)
+  (filterv (fn [s :- String] :- Bool
+             (and (some? (k/one-i idx s "session_of"))
+                  (and (some? (k/one-i idx s "end_time"))
+                       (nil? (k/one-i idx s "clockify_id")))))
+           (:subjects idx)))
+
+;; --- windowed totals: logged time per thread within date prefixes (today/week)
+(defn- starts-with-any? [s :- String prefixes :- (Vec String)] :- Bool
+  (loop [ps prefixes]
+    (if (empty? ps)
+      false
+      (if (str/starts-with? s (first ps)) true (recur (vec (rest ps)))))))
+
+(defn- actual-seconds-in [idx :- k/Index te :- String prefixes :- (Vec String) iso->sec :- [String -> Int]] :- Int
+  (reduce (fn [acc :- Int s :- String] :- Int
+            (let [so (k/one-i idx s "session_of")
+                  st (k/one-i idx s "start_time")
+                  en (k/one-i idx s "end_time")]
+              (if (and (= so te)
+                       (and (some? st)
+                            (and (some? en) (starts-with-any? st prefixes))))
+                (+ acc (- (iso->sec en) (iso->sec st)))
+                acc)))
+          0
+          (:subjects idx)))
+
+(defn logged-rows [idx :- k/Index prefixes :- (Vec String) iso->sec :- [String -> Int]] :- (Vec Row)
+  (filterv (fn [r :- Row] :- Bool (> (:act-sec r) 0))
+           (mapv (fn [te :- String] :- Row
+                   (->Row te 0 (actual-seconds-in idx te prefixes iso->sec) (k/terminal-i? idx te)))
+                 (k/thread-ids-i idx))))

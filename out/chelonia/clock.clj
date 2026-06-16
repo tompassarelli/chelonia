@@ -1,5 +1,6 @@
 (ns chelonia.clock
-  (:require [chelonia.kernel :as k]))
+  (:require [chelonia.kernel :as k]
+            [clojure.string :as str]))
 
 (defn running-session [idx]
   (reduce (fn [found s] (if (some? found) found (if (and (some? (k/one-i idx s "session_of")) (and (some? (k/one-i idx s "start_time")) (nil? (k/one-i idx s "end_time")))) s found))) nil (:subjects idx)))
@@ -42,3 +43,19 @@
    act-sec (reduce (fn [m r] (+ m (:act-sec r))) 0 done)
    pct (if (> est-sec 0) (quot (* act-sec 100) est-sec) 0)]
   (->Calib pct (count done) est-sec act-sec)))
+
+(defn syncable-sessions [idx]
+  (filterv (fn [s] (and (some? (k/one-i idx s "session_of")) (and (some? (k/one-i idx s "end_time")) (nil? (k/one-i idx s "clockify_id"))))) (:subjects idx)))
+
+(defn- ^Boolean starts-with-any? [^String s prefixes]
+  (loop [ps prefixes]
+  (if (empty? ps) false (if (str/starts-with? s (first ps)) true (recur (vec (rest ps)))))))
+
+(defn- actual-seconds-in [idx ^String te prefixes iso->sec]
+  (reduce (fn [acc s] (let [so (k/one-i idx s "session_of")
+   st (k/one-i idx s "start_time")
+   en (k/one-i idx s "end_time")]
+  (if (and (= so te) (and (some? st) (and (some? en) (starts-with-any? st prefixes)))) (+ acc (- (iso->sec en) (iso->sec st))) acc))) 0 (:subjects idx)))
+
+(defn logged-rows [idx prefixes iso->sec]
+  (filterv (fn [r] (> (:act-sec r) 0)) (mapv (fn [te] (->Row te 0 (actual-seconds-in idx te prefixes iso->sec) (k/terminal-i? idx te))) (k/thread-ids-i idx))))

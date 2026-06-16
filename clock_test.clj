@@ -37,7 +37,12 @@
    (asrt 34 "@s4" "end_time"   "2026-06-16T09:00:00")
    ;; @t4 — estimate only, no sessions -> in rows, 0 actual
    (asrt 40 "@t4" "title" "T4")
-   (asrt 41 "@t4" "estimate_hours" "3")])
+   (asrt 41 "@t4" "estimate_hours" "3")
+   ;; @s5 — a CLOSED but already-synced session (has clockify_id) -> not syncable
+   (asrt 50 "@s5" "session_of" "@t3")
+   (asrt 51 "@s5" "start_time" "2026-06-16T20:00:00")
+   (asrt 52 "@s5" "end_time"   "2026-06-16T20:30:00")
+   (asrt 53 "@s5" "clockify_id" "cf-abc")])
 
 (def idx (k/build-index (:claims (fold/fold asserts))))
 (defn iso->sec [s] (chelonia.rt/iso-to-seconds s))
@@ -49,6 +54,9 @@
 (def rs (clk/rows idx iso->sec str->int))
 (def row-tes (set (map :te rs)))
 (def cal (clk/calibration rs))
+(def syncable (set (clk/syncable-sessions idx)))
+(def today-rows (set (map :te (clk/logged-rows idx ["2026-06-16"] iso->sec))))
+(def other-day  (set (map :te (clk/logged-rows idx ["2020-01-01"] iso->sec))))
 
 (def checks
   [["running-session finds the open session"     (= run "@s3")]
@@ -57,7 +65,12 @@
    ["rows include estimate-only thread"           (contains? row-tes "@t4")]
    ["rows are titleless-session-free"             (not (contains? row-tes "@s1"))]
    ["calibration sample = only done w/ both"      (= (:sample cal) 1)]
-   ["calibration % = actual/estimate (150)"       (= (:pct cal) 150)]])
+   ["calibration % = actual/estimate (150)"       (= (:pct cal) 150)]
+   ["syncable: closed + unsynced sessions"        (= syncable #{"@s1" "@s2" "@s4"})]
+   ["syncable excludes open session"              (not (contains? syncable "@s3"))]
+   ["syncable excludes already-synced session"    (not (contains? syncable "@s5"))]
+   ["windowed totals match the date"              (contains? today-rows "@t1")]
+   ["windowed totals exclude other days"          (empty? other-day)]])
 
 (let [fails (remove second checks)]
   (doseq [[nm ok] checks] (println (if ok "  [PASS] " "  [FAIL] ") nm))
