@@ -1,0 +1,129 @@
+#lang beagle/clj
+;; ============================================================================
+;; chelonia.cnf — the reified CNF kernel (Stage 1).  THE one engine.
+;; ============================================================================
+;; DOMAIN-AGNOSTIC by construction: knows ONLY Object / Value / Claim / tx. ZERO
+;; life-os vocabulary (no thread/title/owner/clock) and ZERO code vocabulary
+;; (no fn/param/AST) — all domain terms are interned VALUES that live as claims,
+;; never symbols in this file. (Tested by cnf_invariant_test.)
+;;
+;; MULTI-STORE: no globals. Every op takes a `ctx` store handle, so one engine
+;; hosts many stores (life-os now; a far larger code-as-claims store later). No
+;; small-N assumptions — interning + indexes are hash maps keyed by id.
+;;
+;; Conforms (single-process semantics) to the Racket oracle
+;; (cnf-experiments/cnf-lib/private/{kernel,datalog,graph}.rkt):
+;;   - ONE monotonic id space; entities, values, claims, AND txs draw from it.
+;;     Entities/values/claims are `objects`; txs are NOT objects (id gaps are fine).
+;;   - value! interns by equality, TYPE-GENERAL (string/number/keyword/symbol/
+;;     bool/list); re-intern returns the same id and consumes none.
+;;   - claims are NOT interned: each claim! mints a fresh id even for identical
+;;     (l p r), and a claim id is itself an object usable in l/p/r (reification).
+;;   - live view = claims − superseded. Supersession is DATA-DRIVEN: a claim whose
+;;     p == the registered supersedes-pred marks its r (the old claim) not-live.
+;;   - provenance = tx entities (seq, agent) + claims; never denormalized fields.
+;; (Semantic conformance, not byte-identical ids — our id layout may differ.)
+;;
+;; API (every op takes ctx; `!` = mutator):
+;;   (new-store) -> ctx
+;;   (entity! ctx) -> id              ;; bare object
+;;   (value! ctx v) -> id             ;; intern ANY literal -> canonical id   [app-B check 1]
+;;   (value-object? ctx id) -> Bool   ;; id carries a literal (disambiguates the #f value)
+;;   (literal ctx id) -> v|nil  ;  (value-id ctx v) -> id|nil
+;;   (begin-tx! ctx agent) -> tx      ;; tx entity (seq monotonic, NOT an object)
+;;   (set-supersedes-pred! ctx pid)   ;; register which predicate triggers supersession
+;;   (claim! ctx l p r tx) -> cid     ;; reified claim; cid is an object       [app-B check 3]
+;;   (claim-of ctx cid) -> {:l :p :r}|nil  ;  (claim-tx ctx cid) -> tx|nil  ;  (tx-seq ctx tx)
+;;   (live? ctx cid) -> Bool
+;;   (by-l/by-p/by-r ctx x) (by-lp ctx l p) (by-pr ctx p r) -> [cid...]  ;; LIVE, insertion order [check 2]
+;;   (current-claims ctx) -> [cid...]
+;; ============================================================================
+(ns chelonia.cnf)
+(define-mode strict)
+
+(defn new-store [] :- Any
+  (atom {:next-id 0 :next-seq 0 :supersedes-pred nil
+         :objects {}        ; id -> true        (entities ∪ values ∪ claims; NOT txs)
+         :values {}         ; id -> literal
+         :val-intern {}     ; literal -> id     (canonical interning, equality-keyed)
+         :claims {}         ; cid -> {:l :p :r}
+         :tx-of {}          ; cid -> tx
+         :txs {}            ; tx  -> {:seq :agent}
+         :superseded {}     ; cid -> true       (not-live marker on the OLD claim)
+         :idx-by-l {} :idx-by-p {} :idx-by-r {} :idx-by-lp {} :idx-by-pr {}}))
+
+;; --- id minting (atomic via swap!'s return value) ---------------------------
+(defn fresh-id! [ctx :- Any] :- Int (:next-id (swap! ctx update :next-id inc)))
+
+(defn entity! [ctx :- Any] :- Int
+  (let [id (fresh-id! ctx)]
+    (swap! ctx update :objects assoc id true)
+    id))
+
+;; intern ANY literal -> a canonical Object id (equal literals share one id).
+(defn value! [ctx :- Any v :- Any] :- Int
+  (let [vi (:val-intern (deref ctx))]
+    (if (contains? vi v)
+      (get vi v)
+      (let [id (fresh-id! ctx)]
+        (swap! ctx update :objects assoc id true)
+        (swap! ctx update :values assoc id v)
+        (swap! ctx update :val-intern assoc v id)
+        id))))
+
+(defn value-object? [ctx :- Any id :- Int] :- Bool (contains? (:values (deref ctx)) id))
+(defn literal [ctx :- Any id :- Int] :- Any (get (:values (deref ctx)) id))
+(defn value-id [ctx :- Any v :- Any] :- Any (get (:val-intern (deref ctx)) v))
+
+;; --- transactions: drawn from the SAME id space, but NOT registered as objects
+(defn begin-tx! [ctx :- Any agent :- Any] :- Int
+  (let [tx (fresh-id! ctx)
+        seq (:next-seq (swap! ctx update :next-seq inc))]
+    (swap! ctx update :txs assoc tx {:seq seq :agent agent})
+    tx))
+
+(defn tx-seq [ctx :- Any tx :- Int] :- Any
+  (let [m (get (:txs (deref ctx)) tx)] (if (some? m) (:seq m) 0)))
+
+;; --- supersession is data-driven: register the predicate that triggers it ----
+(defn set-supersedes-pred! [ctx :- Any pid :- Int] :- Any
+  (swap! ctx assoc :supersedes-pred pid))
+
+;; --- claims (reified: each has its own Object id) ---------------------------
+(defn- index-claim! [ctx :- Any cid :- Int l :- Int p :- Int r :- Int] :- Any
+  (swap! ctx update :idx-by-l update l (fn [o :- Any] :- Any (conj (or o []) cid)))
+  (swap! ctx update :idx-by-p update p (fn [o :- Any] :- Any (conj (or o []) cid)))
+  (swap! ctx update :idx-by-r update r (fn [o :- Any] :- Any (conj (or o []) cid)))
+  (swap! ctx update :idx-by-lp update [l p] (fn [o :- Any] :- Any (conj (or o []) cid)))
+  (swap! ctx update :idx-by-pr update [p r] (fn [o :- Any] :- Any (conj (or o []) cid))))
+
+;; Assert a claim. If p is the registered supersedes-pred, this claim marks its r
+;; (the old claim) not-live — so supersession is just a claim-about-a-claim.
+(defn claim! [ctx :- Any l :- Int p :- Int r :- Int tx :- Int] :- Int
+  (let [cid (fresh-id! ctx)]
+    (swap! ctx update :objects assoc cid true)
+    (swap! ctx update :claims assoc cid {:l l :p p :r r})
+    (swap! ctx update :tx-of assoc cid tx)
+    (index-claim! ctx cid l p r)
+    (when (= p (:supersedes-pred (deref ctx)))
+      (swap! ctx update :superseded assoc r true))
+    cid))
+
+(defn claim-of [ctx :- Any cid :- Int] :- Any (get (:claims (deref ctx)) cid))
+(defn claim-tx [ctx :- Any cid :- Int] :- Any (get (:tx-of (deref ctx)) cid))
+
+;; --- queries over the LIVE view (claims − superseded) -----------------------
+(defn live? [ctx :- Any cid :- Int] :- Bool
+  (not (contains? (:superseded (deref ctx)) cid)))
+
+(defn- live-only [ctx :- Any cids :- Any] :- Any
+  (filterv (fn [c :- Int] :- Bool (live? ctx c)) cids))
+
+(defn by-l [ctx :- Any l :- Int] :- Any (live-only ctx (get (:idx-by-l (deref ctx)) l [])))
+(defn by-p [ctx :- Any p :- Int] :- Any (live-only ctx (get (:idx-by-p (deref ctx)) p [])))
+(defn by-r [ctx :- Any r :- Int] :- Any (live-only ctx (get (:idx-by-r (deref ctx)) r [])))
+(defn by-lp [ctx :- Any l :- Int p :- Int] :- Any (live-only ctx (get (:idx-by-lp (deref ctx)) [l p] [])))
+(defn by-pr [ctx :- Any p :- Int r :- Int] :- Any (live-only ctx (get (:idx-by-pr (deref ctx)) [p r] [])))
+
+(defn current-claims [ctx :- Any] :- Any
+  (live-only ctx (vec (keys (:claims (deref ctx))))))
