@@ -3,6 +3,7 @@
   (:require [chelonia.kernel :as k]
             [chelonia.fold :as fold]
             [chelonia.projections :as proj]
+            [chelonia.staleness :as stale]
             [chelonia.import :as imp]
             [chelonia.export :as exp]
             [chelonia.audit :as audit]
@@ -219,6 +220,21 @@
   (plate-group idx "blocked" blocked-g)
   (plate-group idx "draft" draft-g)))
 
+(defn cmd-needs-review [^String log]
+  (let [as (chelonia.rt/read-log log)
+   idx (k/build-index (:claims (fold/fold as)))
+   latest (fold/fold-latest as)
+   today (chelonia.rt/today-iso)
+   reviews (stale/needs-review idx latest today (fn [a b] (chelonia.rt/str-lt? a b)))
+   promo (stale/promotable idx)]
+  (println (str "NEEDS REVIEW — " (count reviews) " judgment(s) whose inputs moved (" today ")"))
+  (doseq [rv reviews]
+  (println (str "  [" (:pred rv) "] " (short-id (:te rv)) "  " (trunc (title-of idx (:te rv)) 44)))
+  (println (str "      " (:detail rv))))
+  (println (str "\nPROMOTABLE — " (count promo) " uncommitted draft(s) that grew real structure"))
+  (doseq [te promo]
+  (println (str "  " (short-id te) "  " (trunc (title-of idx te) 52))))))
+
 (defn cmd-set [^String log ^String id ^String pred ^String value]
   (let [f (fold/fold (chelonia.rt/read-log log))
    claims (:claims f)
@@ -317,6 +333,7 @@
   (= cmd "next") (cmd-next log)
   (= cmd "agenda") (cmd-agenda log)
   (= cmd "plate") (cmd-plate log)
+  (= cmd "needs-review") (cmd-needs-review log)
   (= cmd "audit") (cmd-audit log)
   (= cmd "doctor") (cmd-doctor threads-dir log)
   (= cmd "watch") (cmd-watch)
@@ -327,7 +344,7 @@
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | audit | doctor | watch | time <sub> | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | needs-review | audit | doctor | watch | time <sub> | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))
