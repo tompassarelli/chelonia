@@ -2,43 +2,16 @@
   (:gen-class)
   (:require [chelonia.kernel :as k]
             [chelonia.fold :as fold]
-            [chelonia.projections :as proj]
-            [chelonia.staleness :as stale]
-            [chelonia.clock :as clk]
             [chelonia.import :as imp]
             [chelonia.export :as exp]
-            [chelonia.audit :as audit]
-            [chelonia.clockify :as cf]
             [clojure.string :as str]
             [chelonia.rt :as rt]))
-
-(defn- ^String title-of [idx ^String te]
-  (let [t (k/one-i idx te "title")]
-  (if (some? t) t "")))
 
 (defn- ^String short-id [^String te]
   (if (str/starts-with? te "@") (subs te 1) te))
 
 (defn- ^String trunc [^String s n]
   (if (> (count s) n) (str (subs s 0 (- n 1)) "…") s))
-
-(defrecord LevItem [te score])
-
-(defn levitem-te [r] (:te r))
-
-(defn levitem-score [r] (:score r))
-
-(defrecord NextItem [te score])
-
-(defn nextitem-te [r] (:te r))
-
-(defn nextitem-score [r] (:score r))
-
-(defrecord AgendaItem [te do_on])
-
-(defn agendaitem-te [r] (:te r))
-
-(defn agendaitem-do_on [r] (:do_on r))
 
 (defn- ^String claim-sig [c]
   (str (:l c) "|" (:p c) "|" (:r c)))
@@ -60,54 +33,6 @@
   (chelonia.rt/write-log log as)
   (println (str "imported -> " (count as) " claims -> " log))))))
 
-(defn- ^Boolean ctrl? [^String s]
-  (or (str/includes? s "\n") (str/includes? s "\r")))
-
-(defn- add-claim [acc ^String te ^String p ^String v]
-  (if (str/blank? v) acc (conj acc (k/->Claim te p v))))
-
-(defn- ^String ref-or-blank [^String v]
-  (if (str/blank? v) "" (str "@" v)))
-
-(defn- capture-claims [^String te ^String title ^String owner ^String source ^String author ^String lead ^String driver ^String proposed ^String today]
-  (let [c (add-claim [] te "title" title)
-   c (add-claim c te "owner" owner)
-   c (add-claim c te "source" source)
-   c (add-claim c te "created_by" (ref-or-blank author))
-   c (add-claim c te "lead" (ref-or-blank lead))
-   c (add-claim c te "driver" (ref-or-blank driver))
-   c (add-claim c te "proposed_by" (ref-or-blank proposed))
-   c (add-claim c te "created_at" today)
-   c (add-claim c te "updated_at" today)
-   c (add-claim c te "committed" today)]
-  c))
-
-(defn cmd-capture [^String threads-dir ^String log ^String title ^String owner]
-  (let [source (chelonia.rt/getenv-or "CHELONIA_SOURCE" "self")
-   author (chelonia.rt/getenv-or "CHELONIA_AUTHOR" "you")
-   lead (chelonia.rt/getenv-or "CHELONIA_LEAD" "")
-   driver (chelonia.rt/getenv-or "CHELONIA_DRIVER" "")
-   proposed (chelonia.rt/getenv-or "CHELONIA_PROPOSED_BY" "")]
-  (cond
-  (or (str/blank? title) (ctrl? title)) (println "usage: capture <title> [owner]   (title must be a non-empty single line)")
-  (ctrl? owner) (println "capture: owner must be a single line")
-  (or (ctrl? source) (ctrl? author) (ctrl? lead) (ctrl? driver) (ctrl? proposed)) (println "capture: CHELONIA_SOURCE/AUTHOR/LEAD/DRIVER/PROPOSED_BY must each be a single line")
-  :else (do
-  (chelonia.rt/ensure-dir threads-dir)
-  (let [id (chelonia.rt/reserve-id threads-dir)
-   slug (chelonia.rt/slugify title)
-   today (chelonia.rt/today-iso)
-   te (str "@" id)
-   path (str threads-dir "/" id "-" slug ".md")]
-  (chelonia.rt/spit-file path (exp/thread-md (capture-claims te title owner source author lead driver proposed today) te))
-  (chelonia.rt/release-id threads-dir id)
-  (let [as (imp/load-corpus threads-dir)
-   file-sigs (sig-member-map (:claims (fold/fold as)))
-   lost (pending-coord-count log file-sigs)]
-  (if (> lost 0) (println (str "captured -> " path "\n" "  NOT imported: " lost " pending coordinator write(s) in the log. " "Re-run `import` (folds in the capture AND those writes), or `import --force`.")) (do
-  (chelonia.rt/write-log log as)
-  (println (str "captured -> " te "  " title "  [owner: " owner "]\n" "  file:     " path "\n" "  imported: " (count as) " claims. Next: chelonia tell " id " <pred> <value>"))))))))))
-
 (defn cmd-export [^String threads-dir ^String log ^String out-dir]
   (let [log-claims (:claims (fold/fold (chelonia.rt/read-log log)))
    file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))]
@@ -119,36 +44,6 @@
    fname (str (subs te 1) "-" (chelonia.rt/slugify (if (some? title) title "untitled")) ".md")]
   (chelonia.rt/spit-file (str out-dir "/" fname) (exp/thread-md log-claims te))))
   (println (str "exported " (count tes) " threads -> " out-dir))))))
-
-(defn cmd-audit [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   rd (audit/repo-drift idx)]
-  (println (str "REPO DRIFT — " (count rd) " group(s):"))
-  (doseq [g rd]
-  (println (str "  " (:norm g) ": " (str/join ", " (:forms g)))))))
-
-(defn cmd-ready [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   rs (proj/ready idx)]
-  (println (str "READY NOW — " (count rs)))
-  (doseq [te rs]
-  (println (str "  " (short-id te) "  " (trunc (title-of idx te) 56))))))
-
-(defn cmd-blocked [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   bs (proj/blocked idx)]
-  (println (str "BLOCKED — " (count bs)))
-  (doseq [te bs]
-  (println (str "  " (short-id te) "  " (trunc (title-of idx te) 48) "  (waiting on " (count (proj/incomplete-deps idx te)) ")")))))
-
-(defn cmd-leverage [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   cands (filterv (fn [te] (not (k/terminal-i? idx te))) (k/work-thread-ids-i idx))
-   items (filterv (fn [it] (> (:score it) 0)) (mapv (fn [te] (->LevItem te (proj/leverage-score idx te))) cands))
-   ranked (vec (take 15 (sort-by (fn [it] (- 0 (:score it))) items)))]
-  (println "TOP UNBLOCKERS — finishing this transitively frees the most stuck threads")
-  (doseq [it ranked]
-  (println (str "  unblocks " (:score it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 46))))))
 
 (defn cmd-validate [^String log]
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
@@ -165,158 +60,6 @@
    cs (k/q-by-l claims te)]
   (if (empty? cs) (println (str "no claims for " te)) (doseq [c cs]
   (println (str "  " (:p c) "  " (trunc (:r c) 80)))))))
-
-(defn cmd-next [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   today (chelonia.rt/today-iso)
-   items (mapv (fn [te] (let [lev (proj/leverage-score idx te)
-   doo (k/one-i idx te "do_on")
-   urg (if (some? doo) (cond
-  (chelonia.rt/str-lt? doo today) 5
-  (= doo today) 3
-  :else 0) 0)
-   mom (if (some? (k/one-i idx te "driver")) 2 0)]
-  (->NextItem te (+ (* 3 lev) (+ urg mom))))) (proj/ready idx))
-   ranked (vec (take 12 (sort-by (fn [it] (- 0 (:score it))) items)))]
-  (println (str "WHAT TO WORK ON — top picks (" today ")"))
-  (doseq [it ranked]
-  (println (str "  [" (:score it) "] " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 50))))))
-
-(defn cmd-agenda [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   today (chelonia.rt/today-iso)
-   cands (filterv (fn [te] (and (not (k/terminal-i? idx te)) (some? (k/one-i idx te "do_on")))) (k/work-thread-ids-i idx))
-   items (mapv (fn [te] (->AgendaItem te (let [d (k/one-i idx te "do_on")]
-  (if (some? d) d "")))) cands)
-   overdue (vec (sort-by (fn [it] (:do_on it)) (filterv (fn [it] (chelonia.rt/str-lt? (:do_on it) today)) items)))
-   todayb (filterv (fn [it] (= (:do_on it) today)) items)
-   upcoming (vec (sort-by (fn [it] (:do_on it)) (filterv (fn [it] (chelonia.rt/str-lt? today (:do_on it))) items)))]
-  (println (str "AGENDA — " today))
-  (println (str "OVERDUE (" (count overdue) ")"))
-  (doseq [it overdue]
-  (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))
-  (println (str "TODAY (" (count todayb) ")"))
-  (doseq [it todayb]
-  (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))
-  (println (str "UPCOMING (" (count upcoming) ")"))
-  (doseq [it upcoming]
-  (println (str "  " (:do_on it) "  " (short-id (:te it)) "  " (trunc (title-of idx (:te it)) 44))))))
-
-(defn- plate-group [idx ^String label grp]
-  (if (not (empty? grp)) (do
-  (println (str "\n" (proj/condition-emoji idx label) " " label " (" (count grp) ")"))
-  (doseq [te grp]
-  (println (str "  " (short-id te) "  " (trunc (title-of idx te) 52)))))))
-
-(defn- in-condition [idx nonterm ^String c]
-  (filterv (fn [te] (= (proj/condition-i idx te) c)) nonterm))
-
-(defn cmd-plate [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   nonterm (filterv (fn [te] (not (k/terminal-i? idx te))) (k/work-thread-ids-i idx))]
-  (println (str "ON YOUR PLATE — " (count nonterm) " open"))
-  (plate-group idx "active" (in-condition idx nonterm "active"))
-  (plate-group idx "ready" (in-condition idx nonterm "ready"))
-  (plate-group idx "blocked" (in-condition idx nonterm "blocked"))
-  (plate-group idx "draft" (in-condition idx nonterm "draft"))))
-
-(defrecord JThread [id title condition emoji])
-
-(defn jthread-id [r] (:id r))
-
-(defn jthread-title [r] (:title r))
-
-(defn jthread-condition [r] (:condition r))
-
-(defn jthread-emoji [r] (:emoji r))
-
-(defrecord JPresentation [active ready blocked draft])
-
-(defn jpresentation-active [r] (:active r))
-
-(defn jpresentation-ready [r] (:ready r))
-
-(defn jpresentation-blocked [r] (:blocked r))
-
-(defn jpresentation-draft [r] (:draft r))
-
-(defrecord JReview [id title pred detail])
-
-(defn jreview-id [r] (:id r))
-
-(defn jreview-title [r] (:title r))
-
-(defn jreview-pred [r] (:pred r))
-
-(defn jreview-detail [r] (:detail r))
-
-(defrecord JClaim [predicate value])
-
-(defn jclaim-predicate [r] (:predicate r))
-
-(defn jclaim-value [r] (:value r))
-
-(defrecord JClockRow [id title est_h actual_sec done])
-
-(defn jclockrow-id [r] (:id r))
-
-(defn jclockrow-title [r] (:title r))
-
-(defn jclockrow-est_h [r] (:est_h r))
-
-(defn jclockrow-actual_sec [r] (:actual_sec r))
-
-(defn jclockrow-done [r] (:done r))
-
-(defrecord JCalib [pct sample])
-
-(defn jcalib-pct [r] (:pct r))
-
-(defn jcalib-sample [r] (:sample r))
-
-(defrecord JClockReport [rows calibration])
-
-(defn jclockreport-rows [r] (:rows r))
-
-(defn jclockreport-calibration [r] (:calibration r))
-
-(defn- ^JThread jthread [idx ^String te]
-  (let [c (proj/condition-i idx te)]
-  (->JThread (short-id te) (title-of idx te) c (proj/condition-emoji idx c))))
-
-(defn cmd-json [^String log ^String what ^String arg]
-  (let [as (chelonia.rt/read-log log)
-   f (fold/fold as)
-   idx (k/build-index (:claims f))]
-  (cond
-  (= what "plate") (println (chelonia.rt/to-json (mapv (fn [te] (jthread idx te)) (filterv (fn [te] (not (k/terminal-i? idx te))) (k/work-thread-ids-i idx)))))
-  (= what "ready") (println (chelonia.rt/to-json (mapv (fn [te] (jthread idx te)) (proj/ready idx))))
-  (= what "blocked") (println (chelonia.rt/to-json (mapv (fn [te] (jthread idx te)) (proj/blocked idx))))
-  (= what "needs-review") (let [latest (fold/fold-latest as)
-   today (chelonia.rt/today-iso)
-   reviews (stale/needs-review idx latest today (fn [a b] (chelonia.rt/str-lt? a b)))]
-  (println (chelonia.rt/to-json (mapv (fn [rv] (->JReview (short-id (:te rv)) (title-of idx (:te rv)) (:pred rv) (:detail rv))) reviews))))
-  (= what "clock-report") (let [rs (clk/rows idx (fn [s] (chelonia.rt/iso-to-seconds s)) (fn [s] (chelonia.rt/parse-int s)))
-   cal (clk/calibration rs)]
-  (println (chelonia.rt/to-json (->JClockReport (mapv (fn [r] (->JClockRow (short-id (:te r)) (title-of idx (:te r)) (:est-h r) (:act-sec r) (:term r))) rs) (->JCalib (:pct cal) (:sample cal))))))
-  (= what "show") (println (chelonia.rt/to-json (mapv (fn [c] (->JClaim (:p c) (:r c))) (k/q-by-l (:claims f) (str "@" arg)))))
-  (= what "presentation") (println (chelonia.rt/to-json (->JPresentation (proj/condition-emoji idx "active") (proj/condition-emoji idx "ready") (proj/condition-emoji idx "blocked") (proj/condition-emoji idx "draft"))))
-  :else (println "usage: json plate|ready|blocked|needs-review|clock-report|show <id>|presentation"))))
-
-(defn cmd-needs-review [^String log]
-  (let [as (chelonia.rt/read-log log)
-   idx (k/build-index (:claims (fold/fold as)))
-   latest (fold/fold-latest as)
-   today (chelonia.rt/today-iso)
-   reviews (stale/needs-review idx latest today (fn [a b] (chelonia.rt/str-lt? a b)))
-   promo (stale/promotable idx)]
-  (println (str "NEEDS REVIEW — " (count reviews) " judgment(s) whose inputs moved (" today ")"))
-  (doseq [rv reviews]
-  (println (str "  [" (:pred rv) "] " (short-id (:te rv)) "  " (trunc (title-of idx (:te rv)) 44)))
-  (println (str "      " (:detail rv))))
-  (println (str "\nPROMOTABLE — " (count promo) " uncommitted draft(s) that grew real structure"))
-  (doseq [te promo]
-  (println (str "  " (short-id te) "  " (trunc (title-of idx te) 52))))))
 
 (defn cmd-set [^String log ^String id ^String pred ^String value]
   (let [f (fold/fold (chelonia.rt/read-log log))
@@ -357,126 +100,10 @@
    rv (if (or (= pred "depends_on") (= pred "part_of") (= pred "relates_to")) (str "@" value) value)
    resp (tell-retry (chelonia.rt/coord-port) op te pred rv 5)]
   (cond
-  (= resp "nodaemon") (println "no coordinator on 127.0.0.1:7977 — run `chelonia serve`, or use `set` (single-writer)")
+  (= resp "nodaemon") (println "no coordinator on 127.0.0.1:7977 — run `fram serve`, or use `set` (single-writer)")
   (= resp "conflict") (println "rejected: write conflict after retries (another agent is racing this id+pred)")
   (str/starts-with? resp "ok:") (println (str "committed via coordinator (v" (subs resp 3) "): " id " " pred " = " rv))
   :else (println (str "REJECTED by coordinator: " resp)))))
-
-(defn- ^String fmt-hm [secs]
-  (str (quot secs 3600) "h " (quot (mod secs 3600) 60) "m"))
-
-(defn- ^String session-thread [idx ^String sess]
-  (let [t (k/one-i idx sess "session_of")]
-  (if (some? t) t "")))
-
-(defn- ^String fresh-sid [idx ^String seed]
-  (if (k/vec-contains? (:subjects idx) (str "@" seed)) (fresh-sid idx (chelonia.rt/bump-id seed)) seed))
-
-(defn cmd-clock-start [^String log ^String id]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   te (str "@" id)
-   run (clk/running-session idx)]
-  (cond
-  (nil? (k/one-i idx te "title")) (println (str "no such thread: " id))
-  (some? run) (println (str "already clocked in on " (short-id (session-thread idx run)) " (session " (short-id run) ") — `clock stop` first"))
-  :else (let [port (chelonia.rt/coord-port)]
-  (if (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up`") (let [sid (fresh-sid idx (chelonia.rt/now-id))
-   ssub (str "@" sid)
-   now (chelonia.rt/now-iso)
-   r1 (tell-retry port "assert" ssub "session_of" te 5)
-   r2 (tell-retry port "assert" ssub "start_time" now 5)]
-  (if (and (str/starts-with? r1 "ok:") (str/starts-with? r2 "ok:")) (println (str "clocked in on " id " at " now "  (session " sid ")")) (println (str "clock start FAILED to record (" r1 "/" r2 ") — retry")))))))))
-
-(defn cmd-clock-stop [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   run (clk/running-session idx)
-   port (chelonia.rt/coord-port)]
-  (cond
-  (nil? run) (println "not clocked in")
-  (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up` (still clocked in)")
-  :else (let [now (chelonia.rt/now-iso)
-   st (k/one-i idx run "start_time")
-   te (session-thread idx run)
-   dur (if (some? st) (- (chelonia.rt/iso-to-seconds now) (chelonia.rt/iso-to-seconds st)) 0)
-   resp (tell-retry port "assert" run "end_time" now 5)]
-  (if (str/starts-with? resp "ok:") (println (str "clocked out of " (short-id te) " — this session " (fmt-hm dur))) (println (str "clock stop FAILED to record end_time (" resp ") — still clocked in, retry")))))))
-
-(defn cmd-clock-status [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   run (clk/running-session idx)]
-  (if (nil? run) (println "not clocked in") (let [now (chelonia.rt/now-iso)
-   st (k/one-i idx run "start_time")
-   te (session-thread idx run)
-   dur (if (some? st) (- (chelonia.rt/iso-to-seconds now) (chelonia.rt/iso-to-seconds st)) 0)]
-  (println (str "clocked in on " (short-id te) "  " (trunc (title-of idx te) 40)))
-  (println (str "  since " (if (some? st) st "?") "  (" (fmt-hm dur) " elapsed)"))))))
-
-(defn cmd-clock-report [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   rs (clk/rows idx (fn [s] (chelonia.rt/iso-to-seconds s)) (fn [s] (chelonia.rt/parse-int s)))
-   cal (clk/calibration rs)]
-  (println (str "TIME LOGGED — estimate vs actual (" (count rs) " thread(s))"))
-  (doseq [r rs]
-  (println (str "  " (short-id (:te r)) "  est " (:est-h r) "h  actual " (fmt-hm (:act-sec r)) "  " (trunc (title-of idx (:te r)) 38))))
-  (if (> (:sample cal) 0) (println (str "\nCALIBRATION — across " (:sample cal) " done thread(s) with both: actuals ran " (:pct cal) "% of estimate" (if (> (:pct cal) 100) " (you under-estimate)" " (you over-estimate)"))) (println "\nCALIBRATION — not enough completed estimate+actual data yet"))))
-
-(defn cmd-clock-sync [^String log]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   dir (chelonia.rt/time-dir)
-   sessions (clk/syncable-sessions idx)
-   port (chelonia.rt/coord-port)]
-  (cond
-  (empty? sessions) (println "nothing to sync — no closed, unsynced sessions")
-  (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up` (sync records clockify_id, so it must be up first)")
-  :else (let [ws (cf/default-workspace)]
-  (println (str "syncing " (count sessions) " session(s) to clockify (workspace " ws ")"))
-  (doseq [s sessions]
-  (let [te (session-thread idx s)
-   owner (let [o (k/one-i idx te "owner")]
-  (if (some? o) o "personal"))
-   proj (cf/project-for dir owner)
-   st (k/one-i idx s "start_time")
-   en (k/one-i idx s "end_time")]
-  (cond
-  (nil? proj) (println (str "  – skip " (short-id s) "  (owner '" owner "' unmapped — `clock map " owner " <project-id>`)"))
-  (or (nil? st) (nil? en)) (println (str "  ! skip " (short-id s) "  (missing start/end)"))
-  :else (let [cid (cf/create-entry ws proj st en (title-of idx te))]
-  (if (= cid "") (println (str "  ! " (short-id s) "  (clockify returned no id)")) (let [wb (tell-retry port "assert" s "clockify_id" cid 5)]
-  (if (str/starts-with? wb "ok:") (println (str "  ✓ " (short-id te) "  " st " → " en "  (clockify " cid ")")) (println (str "  !! " (short-id s) " PUSHED to clockify (" cid ") but failed to record it (" wb ") — set manually to avoid a double-push: tell " (short-id s) " clockify_id " cid)))))))))
-  (println "done.")))))
-
-(defn- clock-window [^String log prefixes ^String label]
-  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   rs (clk/logged-rows idx prefixes (fn [s] (chelonia.rt/iso-to-seconds s)))
-   total (reduce (fn [m r] (+ m (:act-sec r))) 0 rs)]
-  (println (str "LOGGED " label " — " (fmt-hm total) " across " (count rs) " thread(s)"))
-  (doseq [r rs]
-  (println (str "  " (fmt-hm (:act-sec r)) "  " (short-id (:te r)) "  " (trunc (title-of idx (:te r)) 40))))))
-
-(defn cmd-clock-today [^String log]
-  (clock-window log (conj [] (subs (chelonia.rt/now-iso) 0 10)) "today"))
-
-(defn cmd-clock-week [^String log]
-  (clock-window log (chelonia.rt/this-week-dates) "this week"))
-
-(defn cmd-doctor [^String threads-dir ^String log]
-  (let [port (chelonia.rt/coord-port)
-   status (chelonia.rt/coord-status port)
-   up (not (= status "down"))
-   serving (str/includes? status log)
-   f (fold/fold (chelonia.rt/read-log log))
-   log-v (:version f)
-   daemon-v (chelonia.rt/coord-version port)
-   fresh (= daemon-v log-v)
-   file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))
-   synced (= (sig-set (:claims f)) (sig-set file-claims))]
-  (println "chelonia doctor")
-  (if up (do
-  (println (str "  [ok]    coordinator UP on 127.0.0.1:" port))
-  (if serving (println "  [ok]    serving the canonical log") (println (str "  [WARN]  daemon is NOT serving " log " — status: " status)))
-  (if fresh (println "  [ok]    daemon state matches the on-disk log") (println (str "  [WARN]  daemon is STALE (loaded v" daemon-v ", log is v" log-v ") — the log changed out-of-band; restart: kill it + `chelonia up`")))) (println (str "  [DOWN]  no coordinator on 127.0.0.1:" port " — writes won't serialize. Run `chelonia up`.")))
-  (if synced (println "  [ok]    files <-> claim log in sync") (println "  [WARN]  files diverge from the log — run `import` to absorb file edits before any `export`"))
-  (if (and up (and serving (and synced fresh))) (println "  => healthy: tell/untell + warm reads are safe") (println "  => DEGRADED: fix the warnings above"))))
 
 (defn cmd-watch []
   (let [port (chelonia.rt/coord-port)]
@@ -488,38 +115,14 @@
   (cond
   (= cmd "import") (cmd-import threads-dir log (and (> (count args) 1) (= (nth args 1) "--force")))
   (= cmd "export") (if (> (count args) 1) (cmd-export threads-dir log (nth args 1)) (println "usage: export <out-dir>"))
-  (= cmd "capture") (if (>= (count args) 2) (cmd-capture threads-dir log (nth args 1) (if (>= (count args) 3) (nth args 2) "personal")) (println "usage: capture <title> [owner]"))
-  (= cmd "ready") (cmd-ready log)
-  (= cmd "blocked") (cmd-blocked log)
-  (= cmd "leverage") (cmd-leverage log)
-  (= cmd "next") (cmd-next log)
-  (= cmd "agenda") (cmd-agenda log)
-  (= cmd "plate") (cmd-plate log)
-  (= cmd "needs-review") (cmd-needs-review log)
-  (= cmd "clock") (let [sub (if (> (count args) 1) (nth args 1) "status")]
-  (cond
-  (= sub "start") (if (>= (count args) 3) (cmd-clock-start log (nth args 2)) (println "usage: clock start <thread-id>"))
-  (= sub "stop") (cmd-clock-stop log)
-  (= sub "status") (cmd-clock-status log)
-  (= sub "report") (cmd-clock-report log)
-  (= sub "today") (cmd-clock-today log)
-  (= sub "week") (cmd-clock-week log)
-  (= sub "sync") (cmd-clock-sync log)
-  (= sub "map") (if (>= (count args) 4) (cf/cmd-map (chelonia.rt/time-dir) (nth args 2) (nth args 3)) (println "usage: clock map <owner> <project-id>"))
-  (= sub "projects") (cf/cmd-projects)
-  (= sub "workspaces") (cf/cmd-workspaces)
-  :else (println "usage: clock start <id> | stop | status | report | today | week | sync | map <owner> <project-id> | projects | workspaces")))
-  (= cmd "audit") (cmd-audit log)
-  (= cmd "doctor") (cmd-doctor threads-dir log)
-  (= cmd "watch") (cmd-watch)
   (= cmd "validate") (cmd-validate log)
-  (= cmd "json") (cmd-json log (if (> (count args) 1) (nth args 1) "") (if (> (count args) 2) (nth args 2) ""))
+  (= cmd "watch") (cmd-watch)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | needs-review | clock <start|stop|status|report|today|week|sync|map|projects|workspaces> | audit | doctor | watch | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "fram (engine) usage: import | export <out-dir> | show <id> | validate | watch | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))
