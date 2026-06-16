@@ -7,7 +7,6 @@
    card-p (c/value! ctx "cardinality")
    kind-p (c/value! ctx "value_kind")]
   (c/set-supersedes-pred! ctx sup-p)
-  (swap! ctx assoc :name-pred name-p :card-pred card-p :kind-pred kind-p)
   (c/claim! ctx name-p card-p (c/value! ctx "single") tx)
   (c/claim! ctx card-p card-p (c/value! ctx "single") tx)
   (c/claim! ctx kind-p card-p (c/value! ctx "single") tx)
@@ -16,7 +15,7 @@
 
 (defn cardinality [ctx pname]
   (let [pid (c/value-id ctx pname)
-   cs (c/by-lp ctx pid (:card-pred (deref ctx)))]
+   cs (c/by-lp ctx pid (c/value-id ctx "cardinality"))]
   (if (empty? cs) "multi" (c/literal ctx (:r (c/claim-of ctx (first cs)))))))
 
 (defn- replace! [ctx subj pid new-cid tx]

@@ -25,7 +25,7 @@
 ;;   bb -cp out cnf_coord.clj test
 ;; ============================================================================
 (require '[chelonia.cnf :as c] '[chelonia.schema :as s]
-         '[clojure.edn :as edn] '[clojure.java.io :as io])
+         '[clojure.edn :as edn] '[clojure.java.io :as io] '[clojure.string :as str])
 
 (defn- store [co] (:store co))
 
@@ -100,7 +100,8 @@
       pname)))
 
 ;; --- the sole writer --------------------------------------------------------
-;; kind = :assert (literal value) | :link (ref to an entity by name) | :retract
+;; kind = :assert (literal value) | :link (ref to an entity by name).  Retract is
+;; a separate entry point (retract!) since it removes rather than supersedes-by-add.
 (defn commit! [co agent te-name pred kind r-spec base]
   (locking (:lock co)
     (let [pid    (c/value-id (store co) pred)
@@ -132,12 +133,40 @@
               tx (c/begin-tx! (store co) agent)
               te (ent! co tx te-name)]
           (case kind
-            :retract (doseq [old (live-cids-lp co te pid)]
-                       (c/claim! (store co) old (c/value! (store co) "cnf-supersedes") old tx))
-            :link    (s/link! (store co) te pred (ent! co tx r-spec) tx)
-            :assert  (s/assert! (store co) te pred r-spec tx))
+            :link   (s/link! (store co) te pred (ent! co tx r-spec) tx)
+            :assert (s/assert! (store co) te pred r-spec tx))
           (append-tx! co (delta-records co since tx))   ; (5) atomic + fsync
           {:ok (get-in @(store co) [:txs tx :seq])})))))
+
+;; retract: single-valued clears (te,pred); multi-valued removes the (te,pred,r)
+;; edge. Same lock + base_version contract as commit! — clearing a driver out
+;; from under an active thread races safely. Supersession is append-only (a
+;; cnf-supersedes claim marks each victim), so retract is itself reversible.
+(defn retract! [co agent te-name pred r-spec base]
+  (locking (:lock co)
+    (let [pid    (c/value-id (store co) pred)
+          te0    (s/resolve-name (store co) te-name)
+          single (= "single" (s/cardinality (store co) pred))]
+      (if (or (nil? te0) (nil? pid))
+        {:ok (current-seq co)}                              ; nothing to retract
+        (let [bv (base-version co te0 pid)]
+          (if (and single (> bv base))
+            {:reject :conflict :version (current-seq co)}
+            (let [tgt (if (and r-spec (str/starts-with? (str r-spec) "@"))
+                        (s/resolve-name (store co) r-spec)
+                        (c/value-id (store co) r-spec))
+                  claims (:claims @(store co))
+                  victims (if single
+                            (live-cids-lp co te0 pid)
+                            (filter #(= tgt (:r (get claims %))) (live-cids-lp co te0 pid)))]
+              (if (empty? victims)
+                {:ok (current-seq co)}
+                (let [since (:next-id @(store co))
+                      tx (c/begin-tx! (store co) agent)
+                      sup (c/value! (store co) "cnf-supersedes")]
+                  (doseq [old victims] (c/claim! (store co) old sup old tx))
+                  (append-tx! co (delta-records co since tx))
+                  {:ok (get-in @(store co) [:txs tx :seq])})))))))))
 
 ;; --- replay: rebuild the store from the v2 log (drops torn/uncommitted txs) --
 (defn- read-records [path]
@@ -198,86 +227,8 @@
         (emit {:k :commit :tx :migration}))
       (.force (.getChannel os) true))))
 
-;; ============================================================================
-;; adversarial concurrency + durability test (mirrors coord.clj's run-test)
-;; ============================================================================
-(defn- live-triples [st]
+;; live (l,p,r) id-triples of a reified store (substrate identity for tests/diff)
+(defn live-triples [st]
   (let [m @st]
     (set (for [cid (keys (:claims m)) :when (not (contains? (:superseded m) cid))]
            (let [cl (get (:claims m) cid)] [(:l cl) (:p cl) (:r cl)])))))
-
-(defn- run-test []
-  (let [log "/tmp/cnf-coord-test.log"
-        co (new-coord log)
-        _ (register-pred! co "status" "single" "literal")
-        _ (register-pred! co "tag" "multi" "ref")
-        _ (register-pred! co "part_of" "single" "ref")
-        results (atom [])
-        checks (atom [])
-        chk (fn [nm ok] (swap! checks conj [nm ok]))]
-
-    ;; ---- (A) base_version: N clients race the SAME single-valued (T,status) --
-    (let [seed (commit! co "seed" "T" "status" :assert "init" 0)
-          base (:ok seed)
-          n 24
-          fs (mapv (fn [i] (future (commit! co (str "w" i) "T" "status" :assert (str "v" i) base)))
-                   (range n))
-          rs (mapv deref fs)
-          wins (filter :ok rs)
-          conflicts (filter #(= :conflict (:reject %)) rs)
-          live (live-cids-lp co (s/resolve-name (store co) "T") (c/value-id (store co) "status"))]
-      (chk "base_version: exactly one racer wins" (= 1 (count wins)))
-      (chk "base_version: the rest are :conflict" (= (dec n) (count conflicts)))
-      (chk "single-valued: exactly one live (T,status) claim" (= 1 (count live))))
-
-    ;; ---- (B) multi-valued idempotency: identical link! twice = one edge ------
-    (let [r1 (commit! co "a" "T" "tag" :link "X" 0)
-          r2 (commit! co "a" "T" "tag" :link "X" 0)
-          live (live-cids-lp co (s/resolve-name (store co) "T") (c/value-id (store co) "tag"))]
-      (chk "idempotency: second identical link! is a no-op" (:idempotent r2))
-      (chk "idempotency: exactly one live (T,tag,X) edge" (= 1 (count live)))
-      (chk "idempotency: distinct multi values both kept"
-           (do (commit! co "a" "T" "tag" :link "Y" 0)
-               (= 2 (count (live-cids-lp co (s/resolve-name (store co) "T")
-                                         (c/value-id (store co) "tag")))))))
-
-    ;; ---- (C) obligation: part_of acyclicity rejected, no state leaked --------
-    (commit! co "a" "A" "part_of" :link "B" 0)
-    (commit! co "a" "B" "part_of" :link "C" 0)
-    (let [before (live-triples (store co))
-          self (commit! co "a" "E" "part_of" :link "E" 0)       ; fresh subject: isolates the self-loop check from base_version
-          cyc  (commit! co "a" "C" "part_of" :link "A" 0)       ; C->A closes A->B->C->A
-          after (live-triples (store co))]
-      (chk "obligation: self part_of rejected" (vector? (:reject self)))
-      (chk "obligation: cycle part_of rejected" (vector? (:reject cyc)))
-      (chk "obligation: rejected writes leak ZERO state" (= before after))
-      (chk "obligation: a valid part_of still commits"
-           (:ok (commit! co "a" "D" "part_of" :link "A" 0))))
-
-    ;; ---- (D) durability: replay reconstructs the exact live view ------------
-    (let [rp (replay log)]
-      (chk "replay: live view set-equal to the coordinator store"
-           (= (live-triples (store co)) (live-triples rp))))
-
-    ;; ---- (E) atomicity: a torn (un-committed) trailing tx is dropped --------
-    (let [before (live-triples (store co))]
-      ;; simulate a crash mid-append: records with NO :commit marker, plus a
-      ;; half-written final line.
-      (with-open [os (java.io.FileOutputStream. log true)]
-        (.write os (.getBytes (str (pr-str {:k :value :id 99999 :v "torn"}) "\n"
-                                   (pr-str {:k :claim :cid 99998 :l 0 :p 0 :r 99999 :tx 99997}) "\n"
-                                   "{:k :claim :cid 99996 :l 0 :p ")        ; torn mid-line
-                              "UTF-8")))
-      (let [rp (replay log)]
-        (chk "atomicity: torn trailing tx dropped on replay" (= before (live-triples rp)))
-        (chk "atomicity: torn value not present after replay"
-             (not (contains? (set (vals (:values @rp))) "torn")))))
-
-    ;; ---- report ------------------------------------------------------------
-    (let [cs @checks fails (remove second cs)]
-      (doseq [[nm ok] cs] (println (if ok "  [PASS] " "  [FAIL] ") nm))
-      (if (empty? fails)
-        (println "\nStage 6: reified coordinator —" (count cs) "/" (count cs) "PASS")
-        (do (println "\nStage 6:" (count fails) "FAILED") (System/exit 1))))))
-
-(when (= "test" (first *command-line-args*)) (run-test))
