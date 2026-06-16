@@ -1,0 +1,138 @@
+#lang beagle/clj
+;; ============================================================================
+;; chelonia.datalog — pure Datalog over the reified claim store (Stage 3).
+;; ============================================================================
+;; Conforms (positive + recursive) to the Racket oracle's datalog.rkt semantics:
+;;   - EDB base relations projected from the LIVE claim store:
+;;       "triple" = (l p r)        "claim" = (cid l p r)
+;;     (current view — superseded claims are excluded by chelonia.cnf/by-* etc.)
+;;   - rules are DATA: a rule derives a head relation from a conjunctive body;
+;;     a body literal is a relation + args; args are vars or constants (ids).
+;;   - joins by substitution threading; a repeated var is an equality join.
+;;   - fixpoint over a finite Herbrand base (no function symbols, set-deduped,
+;;     monotonic) — terminates. Recursion (transitive closure) supported.
+;; Constants in rules are already object/value ids (the domain layer resolves
+;; predicate/value names to ids via chelonia.schema before building rules), so
+;; the engine needs no literal resolution — it is domain-agnostic.
+;;
+;; This file: the POSITIVE + RECURSIVE core (naive fixpoint — correct results,
+;; cold-recompute per the v1 decision; semi-naive/incremental is the Stage-8 perf
+;; upgrade). Stratified negation is added next (chelonia.datalog/strata).
+;; ============================================================================
+(ns chelonia.datalog)
+(require chelonia.cnf :as c)
+
+;; --- rule/term constructors (rules are plain data) --------------------------
+(defn v [name :- Any] :- Any {:var name})                 ; a logic variable
+(defn lit [rel :- Any args :- Any] :- Any {:rel rel :args args :neg false})
+;; a NEGATED body literal (negation-as-failure): succeeds iff the ground tuple is
+;; absent. Range-restricted — all its vars must be bound by earlier positive lits.
+(defn nlit [rel :- Any args :- Any] :- Any {:rel rel :args args :neg true})
+(defn rule [hrel :- Any hargs :- Any body :- Any] :- Any
+  {:head {:rel hrel :args hargs} :body body})
+
+(defn- var? [t :- Any] :- Bool (and (map? t) (contains? t :var)))
+
+;; --- EDB: project the LIVE claim store into triple/claim tuple-sets ----------
+(defn edb [ctx :- Any] :- Any
+  (reduce (fn [db :- Any cid :- Any] :- Any
+            (let [cl (c/claim-of ctx cid) l (:l cl) p (:p cl) r (:r cl)
+                  db1 (update db "triple" (fn [s :- Any] :- Any (conj (or s #{}) [l p r])))]
+              (update db1 "claim" (fn [s :- Any] :- Any (conj (or s #{}) [cid l p r])))))
+          {} (c/current-claims ctx)))
+
+;; --- unification (positional, substitution = var-name -> value) -------------
+(defn- unify [term :- Any val :- Any subst :- Any] :- Any   ; -> subst | nil
+  (if (var? term)
+    (let [n (:var term)]
+      (if (contains? subst n)
+        (if (= (get subst n) val) subst nil)
+        (assoc subst n val)))
+    (if (= term val) subst nil)))
+
+(defn- unify-args [args :- Any tuple :- Any subst :- Any] :- Any   ; -> subst | nil
+  (if (not (= (count args) (count tuple)))
+    nil
+    (loop [a args t tuple s subst]
+      (cond
+        [(nil? s) nil]
+        [(empty? a) s]
+        [:else (recur (rest a) (rest t) (unify (first a) (first t) s))]))))
+
+(defn- ground [args :- Any subst :- Any] :- Any
+  (mapv (fn [t :- Any] :- Any (if (var? t) (get subst (:var t)) t)) args))
+
+;; literal match. Positive: scan the relation's tuples, collect substs. Negated:
+;; ground the (range-restricted) args and pass the subst through iff that tuple is
+;; absent from the relation (which, when stratified, is a frozen lower stratum).
+(defn- match-lit [db :- Any litt :- Any subst :- Any] :- Any   ; -> [subst...]
+  (if (:neg litt)
+    (let [g (ground (:args litt) subst)]
+      (if (contains? (get db (:rel litt) #{}) g) [] [subst]))
+    (let [tuples (vec (get db (:rel litt) #{})) args (:args litt)]
+      (filterv (fn [s :- Any] :- Bool (some? s))
+               (mapv (fn [tup :- Any] :- Any (unify-args args tup subst)) tuples)))))
+
+;; conjunctive body: thread substitutions left-to-right (nested-loop join)
+(defn- eval-body [db :- Any body :- Any subst :- Any] :- Any   ; -> [subst...]
+  (reduce (fn [substs :- Any litt :- Any] :- Any
+            (reduce (fn [acc :- Any s :- Any] :- Any
+                      (vec (concat acc (match-lit db litt s))))
+                    [] substs))
+          [subst] body))
+
+;; one rule -> the set of head tuples it derives against db
+(defn- derive-rule [db :- Any r :- Any] :- Any
+  (let [head (:head r)]
+    (reduce (fn [acc :- Any s :- Any] :- Any (conj acc (ground (:args head) s)))
+            #{} (eval-body db (:body r) {}))))
+
+;; naive fixpoint: re-derive all rules against the round's db until stable
+(defn fixpoint [db0 :- Any rules :- Any] :- Any
+  (loop [db db0]
+    (let [db2 (reduce (fn [d :- Any r :- Any] :- Any
+                        (let [rel (:rel (:head r))
+                              heads (derive-rule db r)]
+                          (update d rel (fn [s :- Any] :- Any
+                                          (reduce (fn [acc :- Any h :- Any] :- Any (conj acc h))
+                                                  (or s #{}) heads)))))
+                      db rules)]
+      (if (= db2 db) db (recur db2)))))
+
+(defn run-rules [ctx :- Any rules :- Any] :- Any (fixpoint (edb ctx) rules))
+
+;; --- stratified negation ----------------------------------------------------
+;; strata = ordered groups of rules. Evaluate each stratum's positive fixpoint on
+;; top of the prior db, so a negated literal always references a FROZEN relation
+;; from a lower stratum (or the EDB) — never a moving target. Recursion through
+;; negation is forbidden (strata-violations catches it).
+(defn run-strata [ctx :- Any strata :- Any] :- Any
+  (reduce (fn [db :- Any stratum :- Any] :- Any (fixpoint db stratum)) (edb ctx) strata))
+
+(defn- neg-lits [stratum :- Any] :- Any
+  (reduce (fn [acc :- Any r :- Any] :- Any
+            (vec (concat acc (filterv (fn [l :- Any] :- Bool (:neg l)) (:body r)))))
+          [] stratum))
+
+;; Safety: a negated literal may only reference the EDB or a STRICTLY-LOWER
+;; stratum's head relation. Returns a list of violations ([] = stratifiable).
+(defn strata-violations [strata :- Any] :- Any
+  (loop [i 0 lower #{} probs []]
+    (if (>= i (count strata))
+      probs
+      (let [stratum (nth strata i)
+            this-rels (reduce (fn [acc :- Any r :- Any] :- Any (conj acc (:rel (:head r)))) #{} stratum)
+            bad (filterv (fn [nl :- Any] :- Bool
+                           (not (or (= "triple" (:rel nl))
+                                    (or (= "claim" (:rel nl)) (contains? lower (:rel nl))))))
+                         (neg-lits stratum))
+            probs2 (vec (concat probs
+                                (mapv (fn [nl :- Any] :- Any
+                                        (str "stratum " i ": negated '" (:rel nl) "' is not EDB or a lower stratum"))
+                                      bad)))]
+        (recur (+ i 1)
+               (reduce (fn [acc :- Any rel :- Any] :- Any (conj acc rel)) lower this-rels)
+               probs2)))))
+
+;; the derived tuples of a relation (as a vector)
+(defn facts [db :- Any rel :- Any] :- Any (vec (get db rel #{})))
