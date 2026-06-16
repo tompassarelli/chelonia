@@ -1,24 +1,24 @@
-# Chelonia
+# Fram
 
-**Thought in, structure out — with almost no friction in between.** I capture an
-intention the moment it lands — `chelonia capture "book the flight"`, or just a
-new Markdown file — *a task, a project, a chore.* Chelonia folds those threads
-into a queryable dependency graph and, from the terminal, tells me what's *ready*,
-what's *blocked*, and which boring keystone unlocks the most progress. The board
-is **derived** from that graph, never hand-maintained — so it can't quietly rot
-the way every other PM tool does.
+**A claim engine — forward through time, append-only, never crushed.** Fram is a
+self-hostable, **domain-neutral** substrate for *claims*: relational facts
+`(subject, predicate, object)` folded into a queryable graph, with stratified
+Datalog derivation and a sole-writer coordinator over a durable append-only log.
 
-A self-hostable, claim-native substrate for coordinating **work and life**. The
-source of truth is a **graph of claims** (relational facts — dependencies,
-ownership, blocking, provenance) — not a board you drag cards around, not rows in
-a database. The Markdown is a faithful, round-trippable *view* of that graph. You
-write threads; you *query* — ready, blocked, highest-leverage — instead of
+The engine knows **nothing** about your domain — cardinality vocabulary,
+lifecycle, and projections are **injected by the app on top** (the live
+coordinator depends on zero domain code). The Markdown/text is a faithful,
+round-trippable *view* of the graph; you *query* — derive — instead of
 maintaining anything.
 
-> **Status: early and experimental.** Built as a personal tool; shared because
-> the *shape* might be useful to others. It's **CLI-shaped** — no polished GUI;
-> the payoff is the graph and the leverage queries, not chrome. Expect rough
-> edges and churn.
+> **[Lodestar](../lodestar) is the life/work app built on Fram.** This repo is the
+> engine; the daily coordination CLI, lifecycle rules, and projections live in
+> Lodestar. The examples below (`chelonia …`) are illustrative of a consumer.
+
+> **Status: early and experimental.** Extracted from the Chelonia coordination
+> tool and made domain-neutral (cardinality + projections injected by the
+> consumer). **CLI-shaped** — the payoff is the graph and the derived queries, not
+> chrome. Expect rough edges and churn.
 
 ## What it looks like
 
