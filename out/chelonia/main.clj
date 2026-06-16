@@ -4,6 +4,7 @@
             [chelonia.fold :as fold]
             [chelonia.projections :as proj]
             [chelonia.staleness :as stale]
+            [chelonia.clock :as clk]
             [chelonia.import :as imp]
             [chelonia.export :as exp]
             [chelonia.audit :as audit]
@@ -279,6 +280,59 @@
   (str/starts-with? resp "ok:") (println (str "committed via coordinator (v" (subs resp 3) "): " id " " pred " = " rv))
   :else (println (str "REJECTED by coordinator: " resp)))))
 
+(defn- ^String fmt-hm [secs]
+  (str (quot secs 3600) "h " (quot (mod secs 3600) 60) "m"))
+
+(defn- ^String session-thread [idx ^String sess]
+  (let [t (k/one-i idx sess "session_of")]
+  (if (some? t) t "")))
+
+(defn cmd-clock-start [^String threads-dir ^String log ^String id]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   te (str "@" id)
+   run (clk/running-session idx)]
+  (cond
+  (nil? (k/one-i idx te "title")) (println (str "no such thread: " id))
+  (some? run) (println (str "already clocked in on " (short-id (session-thread idx run)) " (session " (short-id run) ") — `clock stop` first"))
+  :else (let [port (chelonia.rt/coord-port)]
+  (if (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up`") (let [sid (chelonia.rt/reserve-id threads-dir)
+   ssub (str "@" sid)
+   now (chelonia.rt/now-iso)]
+  (tell-retry port "assert" ssub "session_of" te 5)
+  (tell-retry port "assert" ssub "start_time" now 5)
+  (chelonia.rt/release-id threads-dir sid)
+  (println (str "clocked in on " id " at " now "  (session " sid ")"))))))))
+
+(defn cmd-clock-stop [^String log]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   run (clk/running-session idx)]
+  (if (nil? run) (println "not clocked in") (let [port (chelonia.rt/coord-port)
+   now (chelonia.rt/now-iso)
+   st (k/one-i idx run "start_time")
+   te (session-thread idx run)
+   dur (if (some? st) (- (chelonia.rt/iso-to-seconds now) (chelonia.rt/iso-to-seconds st)) 0)]
+  (tell-retry port "assert" run "end_time" now 5)
+  (println (str "clocked out of " (short-id te) " — this session " (fmt-hm dur)))))))
+
+(defn cmd-clock-status [^String log]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   run (clk/running-session idx)]
+  (if (nil? run) (println "not clocked in") (let [now (chelonia.rt/now-iso)
+   st (k/one-i idx run "start_time")
+   te (session-thread idx run)
+   dur (if (some? st) (- (chelonia.rt/iso-to-seconds now) (chelonia.rt/iso-to-seconds st)) 0)]
+  (println (str "clocked in on " (short-id te) "  " (trunc (title-of idx te) 40)))
+  (println (str "  since " (if (some? st) st "?") "  (" (fmt-hm dur) " elapsed)"))))))
+
+(defn cmd-clock-report [^String log]
+  (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
+   rs (clk/rows idx (fn [s] (chelonia.rt/iso-to-seconds s)) (fn [s] (chelonia.rt/parse-int s)))
+   cal (clk/calibration rs)]
+  (println (str "TIME LOGGED — estimate vs actual (" (count rs) " thread(s))"))
+  (doseq [r rs]
+  (println (str "  " (short-id (:te r)) "  est " (:est-h r) "h  actual " (fmt-hm (:act-sec r)) "  " (trunc (title-of idx (:te r)) 38))))
+  (if (> (:sample cal) 0) (println (str "\nCALIBRATION — across " (:sample cal) " done thread(s) with both: actuals ran " (:pct cal) "% of estimate" (if (> (:pct cal) 100) " (you under-estimate)" " (you over-estimate)"))) (println "\nCALIBRATION — not enough completed estimate+actual data yet"))))
+
 (defn cmd-doctor [^String threads-dir ^String log]
   (let [port (chelonia.rt/coord-port)
    status (chelonia.rt/coord-status port)
@@ -334,6 +388,13 @@
   (= cmd "agenda") (cmd-agenda log)
   (= cmd "plate") (cmd-plate log)
   (= cmd "needs-review") (cmd-needs-review log)
+  (= cmd "clock") (let [sub (if (> (count args) 1) (nth args 1) "status")]
+  (cond
+  (= sub "start") (if (>= (count args) 3) (cmd-clock-start threads-dir log (nth args 2)) (println "usage: clock start <thread-id>"))
+  (= sub "stop") (cmd-clock-stop log)
+  (= sub "status") (cmd-clock-status log)
+  (= sub "report") (cmd-clock-report log)
+  :else (println "usage: clock start <id> | stop | status | report")))
   (= cmd "audit") (cmd-audit log)
   (= cmd "doctor") (cmd-doctor threads-dir log)
   (= cmd "watch") (cmd-watch)
@@ -344,7 +405,7 @@
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | needs-review | audit | doctor | watch | time <sub> | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "usage: capture <title> [owner] | import | export <out-dir> | ready | blocked | leverage | next | agenda | plate | needs-review | clock <start|stop|status|report> | audit | doctor | watch | time <sub> | validate | show <id> | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
 
 (defn -main [& args]
   (run (vec args) (chelonia.rt/threads-dir) (chelonia.rt/log-path)))

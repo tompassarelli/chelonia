@@ -1,0 +1,67 @@
+#lang beagle/clj
+(ns chelonia.clock
+  "Claim-native time logging: a work session is an entity
+     @<sessid>  session_of  @<thread>
+     @<sessid>  start_time  <iso>
+     @<sessid>  end_time    <iso>      (absent while the clock runs)
+   so actual effort rolls up to the thread and estimate-vs-actual calibrates
+   future estimates. Sessions are titleless, so they never appear in thread
+   projections or file exports — they live in the claim log and roll up here.
+   Pure: clock seconds come from an injected iso->sec; actual stays DERIVED,
+   never stored, consistent with the no-stored-derived model (D6).")
+
+(require chelonia.kernel :as k)
+
+;; the single open session: has session_of + start_time, no end_time.
+(defn running-session [idx :- k/Index] :- String?
+  (reduce (fn [found :- String? s :- String] :- String?
+            (if (some? found)
+              found
+              (if (and (some? (k/one-i idx s "session_of"))
+                       (and (some? (k/one-i idx s "start_time"))
+                            (nil? (k/one-i idx s "end_time"))))
+                s
+                found)))
+          nil
+          (:subjects idx)))
+
+;; total closed-session seconds logged against thread te.
+(defn actual-seconds [idx :- k/Index te :- String iso->sec :- [String -> Int]] :- Int
+  (reduce (fn [acc :- Int s :- String] :- Int
+            (let [so (k/one-i idx s "session_of")
+                  st (k/one-i idx s "start_time")
+                  en (k/one-i idx s "end_time")]
+              (if (and (= so te)
+                       (and (some? st) (some? en)))
+                (+ acc (- (iso->sec en) (iso->sec st)))
+                acc)))
+          0
+          (:subjects idx)))
+
+(defrecord Row [te :- String est-h :- Int act-sec :- Int term :- Bool])
+
+;; one row per thread that has an estimate OR any logged time.
+(defn rows [idx :- k/Index iso->sec :- [String -> Int] str->int :- [String -> Int]] :- (Vec Row)
+  (reduce (fn [acc :- (Vec Row) te :- String] :- (Vec Row)
+            (let [est-s (k/one-i idx te "estimate_hours")
+                  est (if (some? est-s) (str->int est-s) 0)
+                  act (actual-seconds idx te iso->sec)]
+              (if (or (> est 0) (> act 0))
+                (conj acc (->Row te est act (k/terminal-i? idx te)))
+                acc)))
+          []
+          (k/thread-ids-i idx)))
+
+;; calibration: across DONE threads carrying both an estimate and logged time,
+;; what % of the estimate did actuals run? (>100 => you under-estimate.)
+(defrecord Calib [pct :- Int sample :- Int est-sec :- Int act-sec :- Int])
+
+(defn calibration [rs :- (Vec Row)] :- Calib
+  (let [done (filterv (fn [r :- Row] :- Bool
+                        (and (:term r)
+                             (and (> (:est-h r) 0) (> (:act-sec r) 0))))
+                      rs)
+        est-sec (reduce (fn [m :- Int r :- Row] :- Int (+ m (* (:est-h r) 3600))) 0 done)
+        act-sec (reduce (fn [m :- Int r :- Row] :- Int (+ m (:act-sec r))) 0 done)
+        pct (if (> est-sec 0) (quot (* act-sec 100) est-sec) 0)]
+    (->Calib pct (count done) est-sec act-sec)))

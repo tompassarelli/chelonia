@@ -214,6 +214,10 @@
     (.toEpochSecond (.atZone (java.time.LocalDateTime/parse normalized)
                              (java.time.ZoneId/systemDefault)))))
 
+;; tolerant int parse for claim literals (estimate_hours etc.); 0 on garbage.
+(defn parse-int [s]
+  (try (Integer/parseInt (str/trim s)) (catch Exception _ 0)))
+
 (defn this-week-dates []
   (let [today (java.time.LocalDate/now)
         dow (.getValue (.getDayOfWeek today))]

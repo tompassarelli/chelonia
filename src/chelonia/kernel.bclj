@@ -14,7 +14,9 @@
 (def single-valued :- (Vec String)
   ["title" "owner" "lead" "driver" "source" "part_of"
    "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "name" "body"
-   "created_by" "committed" "outcome" "abandoned" "superseded_by" "merged_into"])
+   "created_by" "committed" "outcome" "abandoned" "superseded_by" "merged_into"
+   ;; time-logging: a work session has one of each (session_of/start/end).
+   "session_of" "start_time" "end_time"])
 
 (defn vec-contains? [xs :- (Vec String) s :- String] :- Bool
   (loop [r xs]
