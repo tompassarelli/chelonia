@@ -40,7 +40,13 @@
    "- show: read one thread's claims.\n"
    "- clock start/stop/status/report: log real time against a thread so estimates "
    "calibrate against actuals over time.\n"
-   "- validate: integrity check.\n\n"
+   "- validate: integrity check.\n"
+   "- presentation: the effective emoji map (condition -> glyph).\n\n"
+   "PRESENTATION CONTRACT: the list tools return an `emoji` field per item, resolved "
+   "from the user's configurable map. Render each item using its given `emoji` as the "
+   "status glyph; do NOT invent your own emoji or decoration. Keep it terse, group by "
+   "project, lead with active work. The user owns the map — to change a glyph: "
+   "tell @ui emoji_<condition> \"<glyph>\" (conditions: active/ready/blocked/draft).\n\n"
    "Prefer capture for new work and tell/untell for changes; the system serializes "
    "and rule-checks every write, so just state facts and let it enforce integrity."))
 
@@ -91,7 +97,9 @@
    {:name "clock_status" :desc "Show the running session + elapsed."
     :schema {:type "object" :properties {}} :argv (fn [_] ["clock" "status"])}
    {:name "clock_report" :desc "Estimate vs actual per thread + calibration %. Returns JSON {rows:[{id,title,est_h,actual_sec,done}],calibration:{pct,sample}}."
-    :schema {:type "object" :properties {}} :argv (fn [_] ["json" "clock-report"])}])
+    :schema {:type "object" :properties {}} :argv (fn [_] ["json" "clock-report"])}
+   {:name "presentation" :desc "The effective emoji map (condition -> glyph), engine defaults + user overrides. Returns JSON {active,ready,blocked,draft}."
+    :schema {:type "object" :properties {}} :argv (fn [_] ["json" "presentation"])}])
 
 (defn find-tool [nm] (first (filter #(= (:name %) nm) tools)))
 

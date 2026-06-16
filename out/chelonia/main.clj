@@ -204,7 +204,7 @@
 
 (defn- plate-group [idx ^String label grp]
   (if (not (empty? grp)) (do
-  (println (str "\n" label " (" (count grp) ")"))
+  (println (str "\n" (proj/condition-emoji idx label) " " label " (" (count grp) ")"))
   (doseq [te grp]
   (println (str "  " (short-id te) "  " (trunc (title-of idx te) 52)))))))
 
@@ -220,13 +220,25 @@
   (plate-group idx "blocked" (in-condition idx nonterm "blocked"))
   (plate-group idx "draft" (in-condition idx nonterm "draft"))))
 
-(defrecord JThread [id title condition])
+(defrecord JThread [id title condition emoji])
 
 (defn jthread-id [r] (:id r))
 
 (defn jthread-title [r] (:title r))
 
 (defn jthread-condition [r] (:condition r))
+
+(defn jthread-emoji [r] (:emoji r))
+
+(defrecord JPresentation [active ready blocked draft])
+
+(defn jpresentation-active [r] (:active r))
+
+(defn jpresentation-ready [r] (:ready r))
+
+(defn jpresentation-blocked [r] (:blocked r))
+
+(defn jpresentation-draft [r] (:draft r))
 
 (defrecord JReview [id title pred detail])
 
@@ -269,7 +281,8 @@
 (defn jclockreport-calibration [r] (:calibration r))
 
 (defn- ^JThread jthread [idx ^String te]
-  (->JThread (short-id te) (title-of idx te) (proj/condition-i idx te)))
+  (let [c (proj/condition-i idx te)]
+  (->JThread (short-id te) (title-of idx te) c (proj/condition-emoji idx c))))
 
 (defn cmd-json [^String log ^String what ^String arg]
   (let [as (chelonia.rt/read-log log)
@@ -287,7 +300,8 @@
    cal (clk/calibration rs)]
   (println (chelonia.rt/to-json (->JClockReport (mapv (fn [r] (->JClockRow (short-id (:te r)) (title-of idx (:te r)) (:est-h r) (:act-sec r) (:term r))) rs) (->JCalib (:pct cal) (:sample cal))))))
   (= what "show") (println (chelonia.rt/to-json (mapv (fn [c] (->JClaim (:p c) (:r c))) (k/q-by-l (:claims f) (str "@" arg)))))
-  :else (println "usage: json plate|ready|blocked|needs-review|clock-report|show <id>"))))
+  (= what "presentation") (println (chelonia.rt/to-json (->JPresentation (proj/condition-emoji idx "active") (proj/condition-emoji idx "ready") (proj/condition-emoji idx "blocked") (proj/condition-emoji idx "draft"))))
+  :else (println "usage: json plate|ready|blocked|needs-review|clock-report|show <id>|presentation"))))
 
 (defn cmd-needs-review [^String log]
   (let [as (chelonia.rt/read-log log)

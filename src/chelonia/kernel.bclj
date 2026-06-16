@@ -25,7 +25,10 @@
       false
       (if (= (first r) s) true (recur (rest r))))))
 
-(defn single? [p :- String] :- Bool (vec-contains? single-valued p))
+;; `emoji_*` are presentation-config predicates (e.g. @ui emoji_blocked "🧱") —
+;; single-valued by prefix so re-configuring replaces, with no per-key listing.
+(defn single? [p :- String] :- Bool
+  (or (vec-contains? single-valued p) (str/starts-with? p "emoji_")))
 
 ;; --- the claim -------------------------------------------------------------
 

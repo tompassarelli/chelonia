@@ -294,7 +294,7 @@
 ;;   blocked = committed, blocked  draft  = not committed
 (defn- plate-group [idx :- k/Index label :- String grp :- (Vec String)] :- Nil
   (when (not (empty? grp))
-    (println (str "\n" label " (" (count grp) ")"))
+    (println (str "\n" (proj/condition-emoji idx label) " " label " (" (count grp) ")"))
     (doseq [te grp]
       (println (str "  " (short-id te) "  " (trunc (title-of idx te) 52))))))
 
@@ -314,7 +314,8 @@
 ;; --- structured (JSON) projections for the MCP edge --------------------------
 ;; Reuse the exact projection functions; just shape rows into records and let
 ;; cheshire serialize. One source of truth — no parallel logic.
-(defrecord JThread [id :- String title :- String condition :- String])
+(defrecord JThread [id :- String title :- String condition :- String emoji :- String])
+(defrecord JPresentation [active :- String ready :- String blocked :- String draft :- String])
 (defrecord JReview [id :- String title :- String pred :- String detail :- String])
 (defrecord JClaim [predicate :- String value :- String])
 (defrecord JClockRow [id :- String title :- String est_h :- Int actual_sec :- Int done :- Bool])
@@ -322,7 +323,8 @@
 (defrecord JClockReport [rows :- (Vec JClockRow) calibration :- JCalib])
 
 (defn- jthread [idx :- k/Index te :- String] :- JThread
-  (->JThread (short-id te) (title-of idx te) (proj/condition-i idx te)))
+  (let [c (proj/condition-i idx te)]
+    (->JThread (short-id te) (title-of idx te) c (proj/condition-emoji idx c))))
 
 (defn cmd-json [log :- String what :- String arg :- String] :- Nil
   (let [as (chelonia.rt/read-log log)
@@ -362,7 +364,11 @@
        (println (chelonia.rt/to-json
                  (mapv (fn [c :- k/Claim] :- JClaim (->JClaim (:p c) (:r c)))
                        (k/q-by-l (:claims f) (str "@" arg)))))]
-      [:else (println "usage: json plate|ready|blocked|needs-review|clock-report|show <id>")])))
+      [(= what "presentation")
+       (println (chelonia.rt/to-json
+                 (->JPresentation (proj/condition-emoji idx "active") (proj/condition-emoji idx "ready")
+                                  (proj/condition-emoji idx "blocked") (proj/condition-emoji idx "draft"))))]
+      [:else (println "usage: json plate|ready|blocked|needs-review|clock-report|show <id>|presentation")])))
 
 ;; Belief-revision view (D8): judgments whose inputs moved since they were made,
 ;; plus uncommitted drafts that grew real structure. Never auto-flips anything —

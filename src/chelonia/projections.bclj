@@ -33,6 +33,21 @@
     [(some? (k/one-i idx te "committed")) (if (blocked? idx te) "blocked" "ready")]
     [:else "draft"]))
 
+;; Presentation: a deterministic, user-configurable emoji per condition. Engine
+;; defaults here; any is overridden by a claim `@ui emoji_<condition> "<glyph>"`,
+;; so the map is data the user owns — not the LLM's stochastic choice.
+(defn- default-emoji [c :- String] :- String
+  (cond
+    [(= c "active") "🔵"]
+    [(= c "ready") "🟢"]
+    [(= c "blocked") "🔴"]
+    [(= c "draft") "⚪"]
+    [:else "•"]))
+
+(defn condition-emoji [idx :- k/Index c :- String] :- String
+  (let [o (k/one-i idx "@ui" (str "emoji_" c))]
+    (if (some? o) o (default-emoji c))))
+
 ;; --- leverage: transitive reverse-dep walk over the prebuilt revdep index ----
 
 (defn transitive-dependents [idx :- k/Index te :- String] :- (Vec String)

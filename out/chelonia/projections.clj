@@ -19,6 +19,18 @@
   (some? (k/one-i idx te "committed")) (if (blocked? idx te) "blocked" "ready")
   :else "draft"))
 
+(defn- ^String default-emoji [^String c]
+  (cond
+  (= c "active") "🔵"
+  (= c "ready") "🟢"
+  (= c "blocked") "🔴"
+  (= c "draft") "⚪"
+  :else "•"))
+
+(defn ^String condition-emoji [idx ^String c]
+  (let [o (k/one-i idx "@ui" (str "emoji_" c))]
+  (if (some? o) o (default-emoji c))))
+
 (defn transitive-dependents [idx ^String te]
   (loop [frontier (k/dependents-i idx te)
    seen []]
