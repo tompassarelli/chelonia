@@ -287,7 +287,10 @@
   (let [t (k/one-i idx sess "session_of")]
   (if (some? t) t "")))
 
-(defn cmd-clock-start [^String threads-dir ^String log ^String id]
+(defn- ^String fresh-sid [idx ^String seed]
+  (if (k/vec-contains? (:subjects idx) (str "@" seed)) (fresh-sid idx (chelonia.rt/bump-id seed)) seed))
+
+(defn cmd-clock-start [^String log ^String id]
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
    te (str "@" id)
    run (clk/running-session idx)]
@@ -295,24 +298,26 @@
   (nil? (k/one-i idx te "title")) (println (str "no such thread: " id))
   (some? run) (println (str "already clocked in on " (short-id (session-thread idx run)) " (session " (short-id run) ") — `clock stop` first"))
   :else (let [port (chelonia.rt/coord-port)]
-  (if (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up`") (let [sid (chelonia.rt/reserve-id threads-dir)
+  (if (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up`") (let [sid (fresh-sid idx (chelonia.rt/now-id))
    ssub (str "@" sid)
-   now (chelonia.rt/now-iso)]
-  (tell-retry port "assert" ssub "session_of" te 5)
-  (tell-retry port "assert" ssub "start_time" now 5)
-  (chelonia.rt/release-id threads-dir sid)
-  (println (str "clocked in on " id " at " now "  (session " sid ")"))))))))
+   now (chelonia.rt/now-iso)
+   r1 (tell-retry port "assert" ssub "session_of" te 5)
+   r2 (tell-retry port "assert" ssub "start_time" now 5)]
+  (if (and (str/starts-with? r1 "ok:") (str/starts-with? r2 "ok:")) (println (str "clocked in on " id " at " now "  (session " sid ")")) (println (str "clock start FAILED to record (" r1 "/" r2 ") — retry")))))))))
 
 (defn cmd-clock-stop [^String log]
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
-   run (clk/running-session idx)]
-  (if (nil? run) (println "not clocked in") (let [port (chelonia.rt/coord-port)
-   now (chelonia.rt/now-iso)
+   run (clk/running-session idx)
+   port (chelonia.rt/coord-port)]
+  (cond
+  (nil? run) (println "not clocked in")
+  (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up` (still clocked in)")
+  :else (let [now (chelonia.rt/now-iso)
    st (k/one-i idx run "start_time")
    te (session-thread idx run)
-   dur (if (some? st) (- (chelonia.rt/iso-to-seconds now) (chelonia.rt/iso-to-seconds st)) 0)]
-  (tell-retry port "assert" run "end_time" now 5)
-  (println (str "clocked out of " (short-id te) " — this session " (fmt-hm dur)))))))
+   dur (if (some? st) (- (chelonia.rt/iso-to-seconds now) (chelonia.rt/iso-to-seconds st)) 0)
+   resp (tell-retry port "assert" run "end_time" now 5)]
+  (if (str/starts-with? resp "ok:") (println (str "clocked out of " (short-id te) " — this session " (fmt-hm dur))) (println (str "clock stop FAILED to record end_time (" resp ") — still clocked in, retry")))))))
 
 (defn cmd-clock-status [^String log]
   (let [idx (k/build-index (:claims (fold/fold (chelonia.rt/read-log log))))
@@ -338,7 +343,10 @@
    dir (chelonia.rt/time-dir)
    sessions (clk/syncable-sessions idx)
    port (chelonia.rt/coord-port)]
-  (if (empty? sessions) (println "nothing to sync — no closed, unsynced sessions") (let [ws (cf/default-workspace)]
+  (cond
+  (empty? sessions) (println "nothing to sync — no closed, unsynced sessions")
+  (< (chelonia.rt/coord-version port) 0) (println "no coordinator on 127.0.0.1:7977 — run `chelonia up` (sync records clockify_id, so it must be up first)")
+  :else (let [ws (cf/default-workspace)]
   (println (str "syncing " (count sessions) " session(s) to clockify (workspace " ws ")"))
   (doseq [s sessions]
   (let [te (session-thread idx s)
@@ -351,9 +359,8 @@
   (nil? proj) (println (str "  – skip " (short-id s) "  (owner '" owner "' unmapped — `clock map " owner " <project-id>`)"))
   (or (nil? st) (nil? en)) (println (str "  ! skip " (short-id s) "  (missing start/end)"))
   :else (let [cid (cf/create-entry ws proj st en (title-of idx te))]
-  (if (= cid "") (println (str "  ! " (short-id s) "  (clockify returned no id)")) (do
-  (tell-retry port "assert" s "clockify_id" cid 5)
-  (println (str "  ✓ " (short-id te) "  " st " → " en "  (clockify " cid ")"))))))))
+  (if (= cid "") (println (str "  ! " (short-id s) "  (clockify returned no id)")) (let [wb (tell-retry port "assert" s "clockify_id" cid 5)]
+  (if (str/starts-with? wb "ok:") (println (str "  ✓ " (short-id te) "  " st " → " en "  (clockify " cid ")")) (println (str "  !! " (short-id s) " PUSHED to clockify (" cid ") but failed to record it (" wb ") — set manually to avoid a double-push: tell " (short-id s) " clockify_id " cid)))))))))
   (println "done.")))))
 
 (defn- clock-window [^String log prefixes ^String label]
@@ -409,7 +416,7 @@
   (= cmd "needs-review") (cmd-needs-review log)
   (= cmd "clock") (let [sub (if (> (count args) 1) (nth args 1) "status")]
   (cond
-  (= sub "start") (if (>= (count args) 3) (cmd-clock-start threads-dir log (nth args 2)) (println "usage: clock start <thread-id>"))
+  (= sub "start") (if (>= (count args) 3) (cmd-clock-start log (nth args 2)) (println "usage: clock start <thread-id>"))
   (= sub "stop") (cmd-clock-stop log)
   (= sub "status") (cmd-clock-status log)
   (= sub "report") (cmd-clock-report log)

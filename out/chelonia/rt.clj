@@ -69,6 +69,14 @@
   (fmt-id (.format (java.time.LocalDateTime/now)
                    (java.time.format.DateTimeFormatter/ofPattern "yyyyMMddHHmmss"))))
 
+;; Advance a dashed id by one second (same fixed-width format). Used to mint a
+;; collision-free session id against the claim graph (sessions live in the log,
+;; not as files, so they can't use the file-based reserve-id).
+(defn bump-id [id]
+  (let [fmt (java.time.format.DateTimeFormatter/ofPattern "yyyyMMddHHmmss")
+        dt (java.time.LocalDateTime/parse (str/replace id "-" "") fmt)]
+    (fmt-id (.format (.plusSeconds dt 1) fmt))))
+
 ;; The thread id, not the filename, is the entity key — two captures in the same
 ;; second produce distinct filenames (slugs differ) but would COLLIDE on id.
 (defn- id-taken? [dir id]
