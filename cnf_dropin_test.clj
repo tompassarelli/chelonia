@@ -41,6 +41,9 @@
 ;; --- a socket write commits through the reified substrate + projects to flat -
 (def v0 (:version (client port {:op :version})))
 (def w1 (client port {:op :assert :te "@dropin-subj" :p "title" :r "Drop-in test" :base v0}))
+;; a DOMAIN write to a reserved engine predicate must be rejected (would collide
+;; with the reified schema layer)
+(def reserved-rej (client port {:op :assert :te "@dropin-subj" :p "name" :r "collide" :base v0}))
 (def after-write-has (contains? (domain-triples (:store @co)) ["@dropin-subj" "title" "Drop-in test"]))
 (def flat-has-write (contains? (flat-set flat) ["@dropin-subj" "title" "Drop-in test"]))
 
@@ -90,7 +93,10 @@
    ["NO v2 :k-records pollute the canonical flat log" no-v2-pollution]
    ["REAL cold fold (unfiltered) succeeds AND == reified view" cold-fold-ok]
    [":version == flat fold version (doctor reports FRESH)" version-fresh]
-   [":version stays FRESH with a torn tail (no false STALE)" fresh-with-torn-tail]])
+   [":version stays FRESH with a torn tail (no false STALE)" fresh-with-torn-tail]
+   ["write to a reserved engine predicate is rejected" (some? (:reject reserved-rej))]
+   ["reserved-pred reject did NOT pollute the flat log"
+    (not (some #(str/includes? % "\"name\"") (remove str/blank? (str/split-lines (slurp flat)))))]])
 
 (println "boot live:" (count (flat-set flat)))
 (let [fails (remove second checks)]

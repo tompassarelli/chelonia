@@ -47,7 +47,8 @@
   (if (and (some? prev) (> (:tx prev) (:tx a))) m (assoc m k (->Latest (:tx a) (:op a) (:l a) (:p a) (:r a) (:frame a)))))) {} asserts))
 
 (defn ^Fold fold [asserts]
-  (let [keyed (keyed-latest asserts)
+  (let [valid (filterv (fn [a] (and (some? (:l a)) (and (some? (:p a)) (some? (:r a))))) asserts)
+   keyed (keyed-latest valid)
    claims (reduce (fn [acc v] (if (= (:op v) "assert") (conj acc (k/->Claim (:l v) (:p v) (:r v))) acc)) [] (vec (vals keyed)))]
   (->Fold claims (max-tx asserts))))
 

@@ -28,7 +28,10 @@
 ;; `emoji_*` are presentation-config predicates (e.g. @ui emoji_blocked "🧱") —
 ;; single-valued by prefix so re-configuring replaces, with no per-key listing.
 (defn single? [p :- String] :- Bool
-  (or (vec-contains? single-valued p) (str/starts-with? p "emoji_")))
+  ;; (string? p) guards str/starts-with? against a non-string p — defense in depth
+  ;; so a stray/torn record can't NPE the whole cold-read path (fold already drops
+  ;; torn lines; this is the belt to that suspenders).
+  (or (vec-contains? single-valued p) (and (string? p) (str/starts-with? p "emoji_"))))
 
 ;; --- the claim -------------------------------------------------------------
 

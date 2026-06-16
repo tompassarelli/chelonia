@@ -74,21 +74,27 @@
 ;; the migrated store.
 (defn- kind-of [r] (if (and r (str/starts-with? (str r) "@")) :link :assert))
 
+;; reserved engine predicates (identity + metadata) — a DOMAIN write to one would
+;; collide with the reified schema layer and silently corrupt; reject at the boundary.
 (defn- do-assert [te p r base]
-  (let [res (commit! @co "coord" te p (kind-of r) r base)]
-    (if (:ok res)
-      (do (when-not (:idempotent res) (append-flat! "assert" te p r (:ok res)))
-          (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
-          {:ok (:ok res)})
-      {:reject (:reject res) :version (:version res)})))
+  (if (schema-preds p)
+    {:reject [(str "reserved predicate '" p "' (engine-internal; use a domain predicate)")] :version (current-seq @co)}
+    (let [res (commit! @co "coord" te p (kind-of r) r base)]
+      (if (:ok res)
+        (do (when-not (:idempotent res) (append-flat! "assert" te p r (:ok res)))
+            (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
+            {:ok (:ok res)})
+        {:reject (:reject res) :version (:version res)}))))
 
 (defn- do-retract [te p r base]
-  (let [res (retract! @co "coord" te p r base)]
-    (if (:ok res)
-      (do (append-flat! "retract" te p r (:ok res))
-          (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
-          {:ok (:ok res)})
-      {:reject (:reject res) :version (:version res)})))
+  (if (schema-preds p)
+    {:reject [(str "reserved predicate '" p "'")] :version (current-seq @co)}
+    (let [res (retract! @co "coord" te p r base)]
+      (if (:ok res)
+        (do (append-flat! "retract" te p r (:ok res))
+            (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
+            {:ok (:ok res)})
+        {:reject (:reject res) :version (:version res)}))))
 
 ;; warm projections (same shapes coord.clj returns)
 (defn- lev-top [idx]
@@ -197,13 +203,13 @@
         st (c/new-store)
         tx (c/begin-tx! st "migrate")]
     (s/setup! st tx)
-    (doseq [p (keys by-pred)]
+    (doseq [p (keys by-pred) :when (not (schema-preds p))]   ; skip reserved engine preds (defensive)
       (s/def-predicate! st p (if (ck/single? p) "single" "multi")
                             (if (some ref-str? (map :r (get by-pred p))) "ref" "literal") tx))
     (let [memo (atom {})
           ent! (fn [sid] (or (get @memo sid)
                              (let [id (c/entity! st)] (swap! memo assoc sid id) (s/name! st id sid tx) id)))]
-      (doseq [cl claims]
+      (doseq [cl claims :when (not (schema-preds (:p cl)))]
         (let [su (ent! (:l cl)) p (:p cl) r (:r cl)]
           (if (ref-str? r) (s/link! st su p (ent! r) tx) (s/assert! st su p r tx)))))
     ;; Seed the seq-space to the flat log's max :tx so (a) :version == the flat

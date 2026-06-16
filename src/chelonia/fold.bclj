@@ -35,7 +35,14 @@
    asserts))
 
 (defn fold [asserts :- (Vec Assertion)] :- Fold
-  (let [keyed (keyed-latest asserts)
+  ;; Drop torn/partial lines (missing l/p/r) BEFORE keying — the log is appended
+  ;; without fsync, so a read caught mid-write can yield an EDN-valid but incomplete
+  ;; assertion, and key-of calls single? on :p. An incomplete line is an unfinished
+  ;; write that must not become a claim. max-tx still counts ALL :tx (version
+  ;; high-water mark, kept consistent with the coordinator's seq seeding).
+  (let [valid (filterv (fn [a :- Assertion] :- Bool
+                         (and (some? (:l a)) (and (some? (:p a)) (some? (:r a))))) asserts)
+        keyed (keyed-latest valid)
         claims (reduce
                 (fn [acc :- (Vec k/Claim) v :- Latest] :- (Vec k/Claim)
                   (if (= (:op v) "assert")

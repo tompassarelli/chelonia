@@ -8,7 +8,7 @@
   (if (empty? r) false (if (= (first r) s) true (recur (rest r))))))
 
 (defn ^Boolean single? [^String p]
-  (or (vec-contains? single-valued p) (str/starts-with? p "emoji_")))
+  (or (vec-contains? single-valued p) (and (string? p) (str/starts-with? p "emoji_"))))
 
 (defrecord Claim [l p r])
 
