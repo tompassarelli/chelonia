@@ -20,10 +20,20 @@
 (load-file "cnf_coord.clj")          ; the reified coordinator library
 
 ;; ---- state: one reified coordinator + a cached read index ------------------
-(def co (atom nil))                  ; {:store :log :lock}
+(def co (atom nil))                  ; {:store :log :lock} — reified canonical (v2 log)
+(def flat-log (atom nil))            ; the flat log, now a PROJECTION the cold CLI folds
 (def cache (atom {:index nil :version -1}))
 (def subscribers (atom []))
 (def schema-preds #{"name" "cardinality" "value_kind" "cnf-supersedes"})
+
+;; flat-log projection: each reified commit also appends the flat {:op :l :p :r}
+;; line the CLI's cold fold reads — so "files are pure projections of the reified
+;; store" (Stage 7) and existing reads keep working UNCHANGED across the cutover.
+(defn- append-flat! [op te p r seq]
+  (when @flat-log
+    (with-open [os (java.io.FileOutputStream. (str @flat-log) true)]
+      (.write os (.getBytes (str (pr-str {:tx seq :op op :l te :p p :r r :ts "t" :by "coord"}) "\n") "UTF-8"))
+      (.flush os))))
 
 ;; read-bridge: reified live view -> the flat (l p r) Claim vec build-index wants.
 (defn reified->claims [c0]
@@ -59,13 +69,17 @@
 (defn- do-assert [te p r base]
   (let [res (commit! @co "coord" te p (kind-of r) r base)]
     (if (:ok res)
-      (do (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r}) {:ok (:ok res)})
+      (do (when-not (:idempotent res) (append-flat! "assert" te p r (:ok res)))
+          (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
+          {:ok (:ok res)})
       {:reject (:reject res) :version (:version res)})))
 
 (defn- do-retract [te p r base]
   (let [res (retract! @co "coord" te p r base)]
     (if (:ok res)
-      (do (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r}) {:ok (:ok res)})
+      (do (append-flat! "retract" te p r (:ok res))
+          (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
+          {:ok (:ok res)})
       {:reject (:reject res) :version (:version res)})))
 
 ;; warm projections (same shapes coord.clj returns)
@@ -124,17 +138,21 @@
       (edn/read-string (.readLine r)))))
 
 ;; ---- boot: replay the v2 log (or bootstrap a fresh one) --------------------
-(defn boot! [log]
-  (let [f (java.io.File. log)]
-    (reset! co (if (and (.exists f) (pos? (.length f)))
-                 {:store (replay log) :log log :lock (Object.)}
-                 (new-coord log))))
-  (index!)
-  @co)
+(defn boot!
+  ([log] (boot! log nil))
+  ([log flat]
+   (reset! flat-log flat)
+   (let [f (java.io.File. log)]
+     (reset! co (if (and (.exists f) (pos? (.length f)))
+                  {:store (replay log) :log log :lock (Object.)}
+                  (new-coord log))))
+   (index!)
+   @co))
 
-(defn serve-daemon [port log]
-  (boot! log)
-  (println (str "reified coordinator: " (count (c/current-claims (:store @co))) " live claims from " log))
+(defn serve-daemon [port log flat]
+  (boot! log flat)
+  (println (str "reified coordinator: " (count (c/current-claims (:store @co))) " live claims from " log
+                (when flat (str "; flat projection -> " flat))))
   (serve port))
 
 ;; ---- adversarial socket test (mirrors coord.clj's run-test) ----------------
@@ -186,9 +204,10 @@
         (println "\nStage 7 (daemon): reified coordinator over the socket —" (count checks) "/" (count checks) "PASS")
         (do (println "\nStage 7 (daemon):" (count fails) "FAILED") (System/exit 1))))))
 
-(let [[cmd p log] *command-line-args*]
+(let [[cmd p log flat] *command-line-args*]
   (case cmd
     "serve" (serve-daemon (Integer/parseInt (or p "7977"))
-                          (or log (str (System/getProperty "user.dir") "/chelonia-data/claims-v2.log")))
+                          (or log (str (System/getProperty "user.dir") "/chelonia-data/claims-v2.log"))
+                          flat)                       ; optional flat-log projection for cold CLI reads
     "test"  (run-test (Integer/parseInt (or p "7988")))
     nil))
