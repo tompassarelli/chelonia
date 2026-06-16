@@ -15,6 +15,10 @@ maintaining anything.
 > engine; the daily coordination CLI, lifecycle rules, and projections live in
 > Lodestar. The examples below (`lodestar …`) are illustrative of a consumer.
 
+> **[Chartroom](../chartroom) is the code-as-claims app built on Fram** — it
+> *authors* the graph and projects source (vs tools that *derive* a graph from
+> text): [comparison](../chartroom/docs/comparison-graphify.md).
+
 > **Status: early and experimental.** Extracted from a single coordination tool
 > and made domain-neutral (cardinality + projections injected by the consumer).
 > **CLI-shaped** — the payoff is the graph and the derived queries, not chrome.
