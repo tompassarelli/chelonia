@@ -22,7 +22,7 @@ Ship the finished site behind the custom domain over HTTPS.
 ## Why this matters
 
 The last real step. It's *blocked* until both the content and the CI pipeline
-are done — `chelonia blocked` will show it waiting on 2.
+are done — `lodestar blocked` will show it waiting on 2.
 
 ## Log
 

@@ -1,9 +1,9 @@
-# generated data — regenerate with `chelonia import`
+# generated data — regenerate with `fram import`
 /claims.log
 *.log
 
 # native build artifacts (build with native/build.sh)
-/native/chelonia-native
+/native/fram-native
 /native/classes/
 /native/.cpcache/
 /.cpcache/

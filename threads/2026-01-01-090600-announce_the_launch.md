@@ -21,7 +21,7 @@ Post about the site once it's live.
 
 Depends on deploy, which depends on content + CI — so finishing *content* or
 *CI* transitively unblocks two threads each. That's why they top
-`chelonia leverage`.
+`lodestar leverage`.
 
 ## Log
 

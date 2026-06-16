@@ -13,9 +13,9 @@ maintaining anything.
 
 > **[Lodestar](../lodestar) is the life/work app built on Fram.** This repo is the
 > engine; the daily coordination CLI, lifecycle rules, and projections live in
-> Lodestar. The examples below (`chelonia …`) are illustrative of a consumer.
+> Lodestar. The examples below (`lodestar …`) are illustrative of a consumer.
 
-> **Status: early and experimental.** Extracted from the Chelonia coordination
+> **Status: early and experimental.** Extracted from the Fram coordination
 > tool and made domain-neutral (cardinality + projections injected by the
 > consumer). **CLI-shaped** — the payoff is the graph and the derived queries, not
 > chrome. Expect rough edges and churn.
@@ -27,10 +27,10 @@ project — no personal data). Nobody maintained a board; this is all computed f
 the same Markdown you'd write anyway (`./demo.sh`):
 
 ```
-$ chelonia import                 # fold the Markdown threads into a claim graph
+$ lodestar import                 # fold the Markdown threads into a claim graph
 imported -> 141 claims
 
-$ chelonia ready                  # what's actually actionable now
+$ lodestar ready                  # what's actually actionable now
 READY NOW
   Write the site content
   Set up CI / deploy pipeline
@@ -38,12 +38,12 @@ READY NOW
   Launch a personal website
   ...
 
-$ chelonia blocked                # what's waiting, and on what
+$ lodestar blocked                # what's waiting, and on what
 BLOCKED — 2
   Deploy the site to production  (waiting on 2)
   Announce the launch  (waiting on 1)
 
-$ chelonia leverage               # the boring keystone a flat list CAN'T surface
+$ lodestar leverage               # the boring keystone a flat list CAN'T surface
 TOP UNBLOCKERS — finishing this transitively frees the most stuck threads
   unblocks 2  Set up CI / deploy pipeline
   unblocks 2  Write the site content
@@ -58,7 +58,7 @@ that "do laundry" unblocks more of your week than the exciting thing.)
 ## The bet: every PM tool rots
 
 Jira, Linear, Notion all lie, for the same reason: keeping them current is manual
-toil nobody does, so the board drifts from reality. Chelonia's bet is to make the
+toil nobody does, so the board drifts from reality. Fram's bet is to make the
 data model **relational** (dependencies, ownership, blocking, provenance are
 first-class), store it as an **append-only log of claims**, and **derive** the
 board from the graph. Then the questions that matter become cheap queries that are
@@ -144,7 +144,7 @@ today; a remote server you own on the roadmap — never a vendor cloud.*
   and an append-only `claims.log`. No database, no account, no cloud, no telemetry.
 - **Nothing is ever overwritten.** The log is the history; every change is
   provenanced and recoverable. Git is your backup.
-- **You can always leave.** `chelonia export` regenerates your Markdown
+- **You can always leave.** `lodestar export` regenerates your Markdown
   claim-identically, so you walk away with exactly what you put in.
 - **Nothing to build.** The compiled code is committed; running it needs only
   [babashka](https://babashka.org). An optional GraalVM native binary gives
@@ -154,24 +154,24 @@ today; a remote server you own on the roadmap — never a vendor cloud.*
 
 ```sh
 # 1. Clone
-git clone https://github.com/tompassarelli/chelonia && cd chelonia
+git clone https://github.com/tompassarelli/lodestar && cd lodestar
 
 # 2. Try it on the bundled example threads
-bin/chelonia import
-bin/chelonia ready
-bin/chelonia leverage        # the keystone a flat list can't surface
+bin/lodestar import
+bin/lodestar ready
+bin/lodestar leverage        # the keystone a flat list can't surface
 
 # 3. Point it at your own threads (any directory of .md files)
 export CHELONIA_THREADS=/path/to/your/threads
 export CHELONIA_LOG=/path/to/your/claims.log
-bin/chelonia import
-bin/chelonia capture "book the flight"   # a thought -> a ready thread, folded into the graph
-bin/chelonia next
+bin/lodestar import
+bin/lodestar capture "book the flight"   # a thought -> a ready thread, folded into the graph
+bin/lodestar next
 
 # 4. (Optional) the warm, multi-agent-safe daemon
-bin/chelonia-daemon 7977             # serves on 127.0.0.1:7977
-bin/chelonia tell <id> state done    # writes go through the coordinator (serialized, rule-checked)
-bin/chelonia ready                   # warm ~1ms read from the in-memory index
+bin/lodestar-daemon 7977             # serves on 127.0.0.1:7977
+bin/lodestar tell <id> state done    # writes go through the coordinator (serialized, rule-checked)
+bin/lodestar ready                   # warm ~1ms read from the in-memory index
 ```
 
 Full command surface: `capture <title> · import · export · ready · blocked ·
@@ -182,8 +182,8 @@ untell · doctor`.
 
 The logic (kernel, fold, projections, import, CLI) is written in **Beagle** — a
 typed Lisp that compiles to Clojure — with host interop in a thin Clojure runtime
-(`src/chelonia/rt.clj`). The compiled Clojure is committed and runs on babashka,
-so **you don't need Beagle to run Chelonia** — only to rebuild from the `.bclj`
+(`src/lodestar/rt.clj`). The compiled Clojure is committed and runs on babashka,
+so **you don't need Beagle to run Fram** — only to rebuild from the `.bclj`
 sources (`build.sh`). (Beagle is a personal language and a real dependency risk,
 disclosed plainly.)
 
