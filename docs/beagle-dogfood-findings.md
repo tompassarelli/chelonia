@@ -29,8 +29,14 @@ These gaps don't just sit in a doc; they're being fixed in the Beagle compiler i
 - **G1 (`defalias`) — SHIPPED** (beagle `d9bb91e`). `(defalias Name <type>)` resolves at
   `parse-type`; purely additive (a meta-form, zero emit/checker change). File-local v1;
   cross-module export is a v2 follow-up.
-- **G4 SLICE-1 (map-pattern narrowing in `match`) — IN FLIGHT**, behind an adversarial
-  soundness review. Full row-polymorphism (the deep half) stays deferred (multi-week).
+- **G4 (kw-access slice) — SHIPPED** (beagle `b39b885`). `(:kw v)` over a record-union now
+  discriminates by key (the `{:ok}|{:error}` win) instead of degrading to `Any`, and is
+  **nil-correct**: non-null only when *every* member declares the key, else `(U field Nil)`.
+  An adversarial soundness review **rejected** the first attempt (it dropped `nil` on partial
+  unions, and narrowed a map-pattern var the emitter never binds) — both fixed (nil-correct
+  kept; the map-pattern narrowing dropped). **Deferred**: map-pattern *destructuring*
+  narrowing + match exhaustiveness over record-unions (need emit to bind the pattern var
+  first); full row-polymorphism (the multi-week half).
 - G2 / G3 / G6 / G7 — queued (Lodestar epic `2026-06-17-190614`).
 
 ## Genuine Beagle gaps (prioritized — these feed the language)
