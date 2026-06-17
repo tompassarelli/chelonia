@@ -79,10 +79,11 @@
     (let [g (ground (:args litt) subst)]
       (if (contains? (get db (:rel litt) #{}) g) [] [subst]))
     (let [tuples (vec (get db (:rel litt) #{})) args (:args litt)]
-      ;; declare the non-null subst return: filterv drops the nils, so the result
-      ;; tuples are all real substs. (A nullable lambda return would not narrow.)
+      ;; unify-args genuinely returns (Map String Any)? — nil on a failed
+      ;; unification — so the mapv lambda's return is NULLABLE. The filterv on
+      ;; some? then drops those nils, so the RESULT vector holds only real substs.
       (filterv (fn [s :- (Map String Any)] :- Bool (some? s))
-               (mapv (fn [tup :- (Vec Any)] :- (Map String Any) (unify-args args tup subst)) tuples)))))
+               (mapv (fn [tup :- (Vec Any)] :- (U (Map String Any) Nil) (unify-args args tup subst)) tuples)))))
 
 ;; conjunctive body: thread substitutions left-to-right (nested-loop join)
 (defn- eval-body [db :- (Map String (Set (Vec Any))) body :- (Vec (Map Keyword Any)) subst :- (Map String Any)] :- (Vec (Map String Any))   ; -> [subst...]
@@ -194,22 +195,39 @@
             (vec (concat acc (filterv (fn [l :- (Map Keyword Any)] :- Bool (:neg l)) (:body r)))))
           [] stratum))
 
-;; Safety: a negated literal may only reference the EDB or a STRICTLY-LOWER
-;; stratum's head relation. Returns a list of violations ([] = stratifiable).
+;; Safety: a negated literal must reference a relation that is COMPLETELY defined
+;; in a STRICTLY-LOWER stratum (or the EDB). Two ways this fails:
+;;   (1) the relation is neither EDB nor a lower-stratum head (forward/undefined) —
+;;       NOT p reads an empty relation;
+;;   (2) the relation is ALSO a head of the CURRENT stratum (recursion-through-
+;;       negation): even if a lower stratum seeds it, the current stratum re-grows
+;;       it in the SAME fixpoint, so NOT p is evaluated against a still-moving
+;;       target — a frozen-target violation that yields evaluation-order-dependent,
+;;       logically inconsistent answers (e.g. q(@b) asserted because ¬p(@b) held at
+;;       derivation time, yet p(@b) is then derived in the same stratum).
+;; Returns a list of violations ([] = stratifiable).
 (defn strata-violations [strata :- (Vec (Vec (Map Keyword Any)))] :- (Vec String)
   (loop [i 0 lower #{} probs []]
     (if (>= i (count strata))
       probs
       (let [stratum (nth strata i)
             this-rels (reduce (fn [acc :- (Set String) r :- (Map Keyword Any)] :- (Set String) (conj acc (:rel (:head r)))) #{} stratum)
-            bad (filterv (fn [nl :- (Map Keyword Any)] :- Bool
-                           (not (or (= "triple" (:rel nl))
-                                    (or (= "claim" (:rel nl)) (contains? lower (:rel nl))))))
-                         (neg-lits stratum))
+            ;; (1) negated rel is not EDB and not a lower stratum's head
+            bad-fwd (filterv (fn [nl :- (Map Keyword Any)] :- Bool
+                               (not (or (= "triple" (:rel nl))
+                                        (or (= "claim" (:rel nl)) (contains? lower (:rel nl))))))
+                             (neg-lits stratum))
+            ;; (2) negated rel is (also) re-derived in THIS stratum -> negative cycle
+            bad-self (filterv (fn [nl :- (Map Keyword Any)] :- Bool (contains? this-rels (:rel nl)))
+                              (neg-lits stratum))
             probs2 (vec (concat probs
-                                (mapv (fn [nl :- (Map Keyword Any)] :- String
-                                        (str "stratum " i ": negated '" (:rel nl) "' is not EDB or a lower stratum"))
-                                      bad)))]
+                                (concat
+                                 (mapv (fn [nl :- (Map Keyword Any)] :- String
+                                         (str "stratum " i ": negated '" (:rel nl) "' is not EDB or a lower stratum"))
+                                       bad-fwd)
+                                 (mapv (fn [nl :- (Map Keyword Any)] :- String
+                                         (str "stratum " i ": negated '" (:rel nl) "' is also derived in the SAME stratum (recursion through negation — not stratifiable)"))
+                                       bad-self))))]
         (recur (+ i 1)
                (reduce (fn [acc :- (Set String) rel :- String] :- (Set String) (conj acc rel)) lower this-rels)
                probs2)))))

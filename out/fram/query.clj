@@ -35,6 +35,33 @@
 (defn- head-rels [rules]
   (reduce (fn [acc r] (if (and (map? r) (map? (:head r))) (conj acc (:rel (:head r))) acc)) #{} rules))
 
+(defn- positive-body-rels [body]
+  (reduce (fn [acc litt] (if (and (map? litt) (not (:neg litt)) (string? (:rel litt))) (conj acc (:rel litt)) acc)) [] body))
+
+(defn- stratum-positive-rels [stratum]
+  (reduce (fn [acc r] (if (and (map? r) (vector? (:body r))) (vec (concat acc (positive-body-rels (:body r)))) acc)) [] stratum))
+
+(defn- stratum-head-rels [stratum]
+  (head-rels (if (vector? stratum) stratum [])))
+
+(defn forward-ref-violations [strata all-derived]
+  (loop [i 0
+   lower #{}
+   probs []]
+  (if (>= i (count strata)) probs (let [stratum (nth strata i)
+   this-rels (stratum-head-rels stratum)
+   avail (reduce (fn [a rel] (conj a rel)) lower (vec this-rels))
+   bad (filterv (fn [rel] (and (contains? all-derived rel) (not (= rel "triple")) (not (= rel "claim")) (not (contains? avail rel)))) (stratum-positive-rels stratum))
+   probs2 (vec (concat probs (mapv (fn [rel] (str "stratum " i ": positively references '" rel "' which is defined only in a LATER stratum — it would evaluate against an empty relation (reorder so '" rel "' is defined first)")) bad)))]
+  (recur (+ i 1) avail probs2)))))
+
+(defn rel-arity-violations [rules]
+  (let [arities (reduce (fn [acc r] (if (and (map? r) (map? (:head r)) (string? (:rel (:head r))) (vector? (:args (:head r)))) (let [rel (:rel (:head r))
+   n (count (:args (:head r)))]
+  (update acc rel (fn [s] (conj (or s #{}) n)))) acc)) {} rules)]
+  (reduce (fn [acc rel] (let [ns (get arities rel #{})]
+  (if (> (count ns) 1) (conj acc (str "relation '" rel "' is derived at inconsistent arities " (str (vec ns)) " — every rule deriving a head must agree on argument count")) acc))) [] (vec (keys arities)))))
+
 (defn- lit-errors [litt known bound]
   (if (not (map? litt)) ["body literal must be a map {:rel r :args [...] :neg? bool}"] (let [rel (:rel litt)
    args (:args litt)
@@ -78,12 +105,21 @@
    ef (if (string? find) (if (contains? known find) [] [(str "unknown :find relation '" find "' — name a :head rel you define")]) [":find must be a relation name (string)"])
    er (if (empty? rules) ["provide at least one rule in :rules or :strata"] [])
    erules (reduce (fn [acc r] (vec (concat acc (rule-errors r known)))) [] rules)
-   esv (d/strata-violations strata)]
-  (vec (concat ef (concat er (concat erules esv)))))))))
+   esv (d/strata-violations strata)
+   efr (forward-ref-violations strata derived)
+   ea (rel-arity-violations rules)]
+  (vec (concat ef (concat er (concat erules (concat esv (concat efr ea)))))))))))
+
+(def max-results (let [env (System/getenv "FRAM_MAX_RESULTS")
+   n (if (and (some? env) (not (= env ""))) (parse-long env) nil)]
+  (if (and (some? n) (> n 0)) n 100000)))
 
 (defn run [claims q]
   (let [errs (validate q)]
   (if (not (empty? errs)) {:error errs} (let [edb (claims->edb claims)
    strata (strata-of q)
-   db (reduce (fn [acc stratum] (d/fixpoint acc stratum)) edb strata)]
-  {:ok (d/facts db (:find q))}))))
+   db (reduce (fn [acc stratum] (d/fixpoint acc stratum)) edb strata)
+   find (:find q)
+   rel (get db find #{})
+   n (count rel)]
+  (if (> n max-results) {:error [(str "result set too large: '" (str find) "' has " n " tuples, over the FRAM_MAX_RESULTS cap of " max-results " — add constants or narrow the query (raise the cap via env FRAM_MAX_RESULTS if intended)")] :over-limit n :max max-results} {:ok (d/facts db find)})))))

@@ -4,7 +4,7 @@
 ;; relation, bad term, unstratified negation) instead of running them — the
 ;; "can't emit broken" property; (3) stratified negation runs when well-formed.
 ;;   bb -cp out query_test.clj
-(require '[fram.kernel :as k] '[fram.query :as q])
+(require '[fram.kernel :as k] '[fram.query :as q] '[fram.datalog :as d])
 
 (def checks (atom []))
 (defn chk [nm ok] (swap! checks conj [nm ok]))
@@ -99,6 +99,121 @@
                                :body [{:rel "triple" :args [{:var "x"} "title" {:var "y"}]}
                                       {:rel "triple" :args [{:var "x"} "depends_on" {:var "y"}] :neg "yes"}]}]}))
 (chk "valid query still runs after tightening (regression)"
+     (contains? (q/run claims {:find "r" :rules [{:head {:rel "r" :args [{:var "x"} {:var "y"}]}
+                                                  :body [{:rel "triple" :args [{:var "x"} "depends_on" {:var "y"}]}]}]}) :ok))
+
+;; ============================================================================
+;; (8) AUDIT REGRESSIONS — soundness holes in the validate boundary. Each query
+;; below validated CLEAN before the fix (silently wrong / unbounded) and is now
+;; REJECTED (or bounded) with a clear, specific signal.
+;; ============================================================================
+
+;; #7 (HIGH) recursion-through-negation: p is in stratum 0 (so it lands in `lower`)
+;; AND re-derived in stratum 1, which also negates p. The negative cycle
+;; p -(neg)-> q -> p was accepted as stratifiable (strata-violations returned []);
+;; NOT p was evaluated against a still-growing p (eval-order-dependent, inconsistent
+;; — q(@b) asserted because ¬p(@b) held, yet p(@b) then derived). Now REJECTED.
+(let [seed-claims [(k/->Claim "@a" "seed" "yes")
+                   (k/->Claim "@a" "node" "yes")
+                   (k/->Claim "@b" "node" "yes")]
+      r (q/run seed-claims
+          {:find "p"
+           :strata [[{:head {:rel "p" :args [{:var "x"}]}
+                      :body [{:rel "triple" :args [{:var "x"} "seed" "yes"]}]}]
+                    [{:head {:rel "q" :args [{:var "x"}]}
+                      :body [{:rel "triple" :args [{:var "x"} "node" "yes"]}
+                             {:rel "p" :args [{:var "x"}] :neg true}]}
+                     {:head {:rel "p" :args [{:var "x"}]}
+                      :body [{:rel "q" :args [{:var "x"}]}]}]]})]
+  (chk "#7 recursion-through-negation REJECTED (negated rel re-derived in same stratum)"
+       (and (contains? r :error) (not (contains? r :ok))))
+  (chk "#7 error names the recursion-through-negation cause"
+       (some #(re-find #"recursion through negation" %) (:error r))))
+
+;; #7 (companion at the engine level): strata-violations itself now flags the cycle.
+(chk "#7 d/strata-violations flags the re-derived negated rel (was [])"
+     (not (empty? (d/strata-violations
+                   [[{:head {:rel "p" :args [{:var "x"}]}
+                      :body [{:rel "triple" :args [{:var "x"} "seed" "yes"]}]}]
+                    [{:head {:rel "q" :args [{:var "x"}]}
+                      :body [{:rel "triple" :args [{:var "x"} "node" "yes"]}
+                             {:rel "p" :args [{:var "x"}] :neg true}]}
+                     {:head {:rel "p" :args [{:var "x"}]}
+                      :body [{:rel "q" :args [{:var "x"}]}]}]]))))
+
+;; #18 (MEDIUM) positive cross-stratum FORWARD reference: stratum 0 positively
+;; references `b`, which is defined only in stratum 1. run evaluates strata in
+;; order, so `b` is still empty when stratum 0 runs -> `a` is silently empty.
+;; validate's `known` (all heads everywhere) let it pass. Now REJECTED.
+(let [r (q/run [(k/->Claim "@x" "title" "T")]
+          {:find "a"
+           :strata [[{:head {:rel "a" :args [{:var "x"}]}
+                      :body [{:rel "b" :args [{:var "x"}]}]}]
+                    [{:head {:rel "b" :args [{:var "x"}]}
+                      :body [{:rel "triple" :args [{:var "x"} "title" {:var "t"}]}]}]]})]
+  (chk "#18 positive forward-reference REJECTED (was silently empty :ok)"
+       (and (contains? r :error) (not (contains? r :ok))))
+  (chk "#18 error names the forward-referenced rel + later-stratum cause"
+       (some #(re-find #"defined only in a LATER stratum" %) (:error r))))
+
+;; #18 the CORRECTLY-ordered program (b first, a after) must still RUN non-empty —
+;; the fix rejects only the bad order, it does not break legitimate layering.
+(let [r (q/run [(k/->Claim "@x" "title" "T")]
+          {:find "a"
+           :strata [[{:head {:rel "b" :args [{:var "x"}]}
+                      :body [{:rel "triple" :args [{:var "x"} "title" {:var "t"}]}]}]
+                    [{:head {:rel "a" :args [{:var "x"}]}
+                      :body [{:rel "b" :args [{:var "x"}]}]}]]})]
+  (chk "#18 correctly-ordered strata still run (not over-rejected)"
+       (and (contains? r :ok) (= (set (:ok r)) #{["@x"]}))))
+
+;; #22 (LOW) a head relation defined at inconsistent arities -> ragged tuples.
+;; `r` derived at arity 1 AND 2 previously validated clean and emitted mixed-shape
+;; rows. Now REJECTED.
+(let [r (q/run [(k/->Claim "@a" "p" "@b") (k/->Claim "@c" "p" "@d")]
+          {:find "r"
+           :rules [{:head {:rel "r" :args [{:var "x"}]}
+                    :body [{:rel "triple" :args [{:var "x"} "p" {:var "z"}]}]}
+                   {:head {:rel "r" :args [{:var "x"} {:var "y"}]}
+                    :body [{:rel "triple" :args [{:var "x"} "p" {:var "y"}]}]}]})]
+  (chk "#22 inconsistent head arity REJECTED (was ragged :ok output)"
+       (and (contains? r :error) (not (contains? r :ok))))
+  (chk "#22 error names inconsistent arities"
+       (some #(re-find #"inconsistent arit" %) (:error r))))
+
+;; #22 a head derived by MULTIPLE rules at the SAME arity must still run.
+(chk "#22 same-arity multi-rule head still runs (not over-rejected)"
+     (contains? (q/run claims
+                  {:find "edge"
+                   :rules [{:head {:rel "edge" :args [{:var "x"} {:var "y"}]}
+                            :body [{:rel "triple" :args [{:var "x"} "depends_on" {:var "y"}]}]}
+                           {:head {:rel "edge" :args [{:var "x"} {:var "y"}]}
+                            :body [{:rel "triple" :args [{:var "y"} "depends_on" {:var "x"}]}]}]})
+                :ok))
+
+;; #11 (HIGH) result-set bound on the AI-facing path. A cross-join (two
+;; unconstrained `triple` literals sharing no variables) over M subjects yields M^2
+;; pairs. With no cap this is materialized as a vector and JSON-serialized whole.
+;; The cap is q/max-results (env FRAM_MAX_RESULTS, here whatever is configured):
+;; build a corpus whose cross-join strictly exceeds it, and assert the over-limit
+;; signal is returned INSTEAD of the (huge) result. Self-calibrates to the cap.
+(let [cap q/max-results
+      m (inc (long (Math/ceil (Math/sqrt (double cap)))))   ; m^2 > cap
+      big-claims (mapv (fn [i] (k/->Claim (str "@s" i) "p" (str "@o" i))) (range m))
+      r (q/run big-claims
+          {:find "pair"
+           :rules [{:head {:rel "pair" :args [{:var "a"} {:var "b"}]}
+                    :body [{:rel "triple" :args [{:var "a"} {:var "pp"} {:var "qq"}]}
+                           {:rel "triple" :args [{:var "b"} {:var "ss"} {:var "tt"}]}]}]})]
+  (chk "#11 oversized result set is BOUNDED (over-limit signal, not :ok)"
+       (and (not (contains? r :ok)) (contains? r :error)))
+  (chk "#11 over-limit signal reports the count and the cap"
+       (and (= (:max r) cap) (> (:over-limit r) cap)))
+  (chk "#11 over-limit error is a clear, actionable message"
+       (some #(re-find #"result set too large" %) (:error r))))
+
+;; #11 a result set WITHIN the cap still returns :ok (the bound doesn't over-trigger).
+(chk "#11 result within the cap still returns :ok"
      (contains? (q/run claims {:find "r" :rules [{:head {:rel "r" :args [{:var "x"} {:var "y"}]}
                                                   :body [{:rel "triple" :args [{:var "x"} "depends_on" {:var "y"}]}]}]}) :ok))
 

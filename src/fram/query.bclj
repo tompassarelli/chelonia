@@ -82,6 +82,68 @@
             (if (and (map? r) (map? (:head r))) (conj acc (:rel (:head r))) acc))
           #{} rules))
 
+;; #18 — positive cross-stratum forward references. `run` evaluates strata in
+;; order, so a POSITIVE body literal that references a relation defined ONLY in a
+;; LATER stratum reads an empty relation (silently incomplete results). validate's
+;; `known` (every head across all strata) does not catch this. Walk strata in
+;; order: a positive ref is safe iff it is the EDB, a strictly-lower stratum head,
+;; or this stratum's own head (intra-stratum recursion is fine). A positive ref to
+;; a derived head that only appears later is the violation.
+;; (Single-:rules form is one stratum, so this never fires there — the gap is the
+;; multi-stratum form, exactly as advertised.)
+(defn- positive-body-rels [body :- (Vec Any)] :- (Vec String)
+  (reduce (fn [acc :- (Vec String) litt :- Any] :- (Vec String)
+            (if (and (map? litt) (not (:neg litt)) (string? (:rel litt)))
+              (conj acc (:rel litt))
+              acc))
+          [] body))
+
+(defn- stratum-positive-rels [stratum :- (Vec Any)] :- (Vec String)
+  (reduce (fn [acc :- (Vec String) r :- Any] :- (Vec String)
+            (if (and (map? r) (vector? (:body r)))
+              (vec (concat acc (positive-body-rels (:body r))))
+              acc))
+          [] stratum))
+
+(defn- stratum-head-rels [stratum :- (Vec Any)] :- (Set String)
+  (head-rels (if (vector? stratum) stratum [])))
+
+(defn forward-ref-violations [strata :- (Vec (Vec Any)) all-derived :- (Set String)] :- (Vec String)
+  (loop [i 0 lower :- (Set String) #{} probs :- (Vec String) []]
+    (if (>= i (count strata))
+      probs
+      (let [stratum (nth strata i)
+            this-rels (stratum-head-rels stratum)
+            avail (reduce (fn [a :- (Set String) rel :- String] :- (Set String) (conj a rel)) lower (vec this-rels))
+            bad (filterv (fn [rel :- String] :- Bool
+                           (and (contains? all-derived rel)            ; a relation the program derives
+                                (not (= rel "triple"))
+                                (not (= rel "claim"))
+                                (not (contains? avail rel))))           ; but not available yet (defined only later)
+                         (stratum-positive-rels stratum))
+            probs2 (vec (concat probs
+                                (mapv (fn [rel :- String] :- String
+                                        (str "stratum " i ": positively references '" rel "' which is defined only in a LATER stratum — it would evaluate against an empty relation (reorder so '" rel "' is defined first)"))
+                                      bad)))]
+        (recur (+ i 1) avail probs2)))))
+
+;; #22 — a derived head relation defined at inconsistent arities yields mixed-shape
+;; tuples (ragged :find output). Reject when two rules deriving the same head :rel
+;; disagree on argument count.
+(defn rel-arity-violations [rules :- (Vec Any)] :- (Vec String)
+  (let [arities (reduce (fn [acc :- (Map String (Set Int)) r :- Any] :- (Map String (Set Int))
+                          (if (and (map? r) (map? (:head r)) (string? (:rel (:head r))) (vector? (:args (:head r))))
+                            (let [rel (:rel (:head r)) n (count (:args (:head r)))]
+                              (update acc rel (fn [s :- (Set Int)] :- (Set Int) (conj (or s #{}) n))))
+                            acc))
+                        {} rules)]
+    (reduce (fn [acc :- (Vec String) rel :- String] :- (Vec String)
+              (let [ns (get arities rel #{})]
+                (if (> (count ns) 1)
+                  (conj acc (str "relation '" rel "' is derived at inconsistent arities " (str (vec ns)) " — every rule deriving a head must agree on argument count"))
+                  acc)))
+            [] (vec (keys arities)))))
+
 ;; per-literal errors, given the known relations + the vars bound by earlier
 ;; positive literals in the same body (for negation range-restriction).
 ;; litt stays Any: it's an open keyword-map validated key-by-key here.
@@ -178,12 +240,34 @@
               erules (reduce (fn [acc :- (Vec String) r :- Any] :- (Vec String)
                                (vec (concat acc (rule-errors r known))))
                              [] rules)
-              esv (d/strata-violations strata)]
-          (vec (concat ef (concat er (concat erules esv)))))))))
+              esv (d/strata-violations strata)
+              ;; #18: a positive body literal must not forward-reference a relation
+              ;; defined only in a later stratum (it would read empty).
+              efr (forward-ref-violations strata derived)
+              ;; #22: a derived head relation must be defined at a single arity.
+              ea (rel-arity-violations rules)]
+          (vec (concat ef (concat er (concat erules (concat esv (concat efr ea)))))))))))
 
-;; run the validated query over the claim fold; {:ok [tuple...]} or {:error [msg...]}.
+;; #11 — upper bound on result-set size. The query path is bounded only by the
+;; Herbrand base (claims^k for a k-ary cross-join), so a model can ask for a result
+;; set that is enormous to materialize and serialize on the AI-facing path. Cap it:
+;; env FRAM_MAX_RESULTS (a positive int), default 100000. On overflow, return a
+;; clear over-limit signal INSTEAD of vectorizing + serializing the whole relation.
+;; Checking the relation's set size (count) allocates nothing — d/facts (the vector
+;; build) and json serialization are only reached when within the cap.
+;; Default sized above the engine's documented legitimate workload (a 200-node
+;; transitive closure is 19900 pairs — datalog_scale_test) while still bounding the
+;; pathological cross-join (subjects^k for a real corpus is millions). A consumer
+;; that genuinely wants a larger set raises FRAM_MAX_RESULTS.
+(def max-results :- Int
+  (let [env :- Any (System/getenv "FRAM_MAX_RESULTS")
+        n :- (U Int Nil) (if (and (some? env) (not (= env ""))) (parse-long env) nil)]
+    (if (and (some? n) (> n 0)) n 100000)))
+
+;; run the validated query over the claim fold; {:ok [tuple...]} | {:error [msg...]}
+;; | {:over-limit n :max m :find rel} when the result set exceeds the cap.
 ;; q + return stay Any: q is the open-map query (above); the result is a tagged
-;; heterogeneous envelope ({:ok ...} | {:error ...}) discriminated by key-presence.
+;; heterogeneous envelope discriminated by key-presence.
 (defn run [claims :- (Vec k/Claim) q :- Any] :- Any
   (let [errs (validate q)]
     (if (not (empty? errs))
@@ -193,5 +277,13 @@
             ;; d/fixpoint returns datalog's (Vec Any)-element Db; that Any is
             ;; assignable into this stricter (Vec String) accumulator (verified).
             db :- (Map String (Set (Vec String)))
-            (reduce (fn [acc :- (Map String (Set (Vec String))) stratum :- (Vec Any)] :- (Map String (Set (Vec String))) (d/fixpoint acc stratum)) edb strata)]
-        {:ok (d/facts db (:find q))}))))
+            (reduce (fn [acc :- (Map String (Set (Vec String))) stratum :- (Vec Any)] :- (Map String (Set (Vec String))) (d/fixpoint acc stratum)) edb strata)
+            find :- Any (:find q)
+            rel :- (Set (Vec String)) (get db find #{})
+            n :- Int (count rel)]
+        (if (> n max-results)
+          ;; over the cap: surface a clear, actionable signal WITHOUT building the
+          ;; (potentially huge) result vector or serializing it.
+          {:error [(str "result set too large: '" (str find) "' has " n " tuples, over the FRAM_MAX_RESULTS cap of " max-results " — add constants or narrow the query (raise the cap via env FRAM_MAX_RESULTS if intended)")]
+           :over-limit n :max max-results}
+          {:ok (d/facts db find)})))))

@@ -120,8 +120,9 @@
    probs []]
   (if (>= i (count strata)) probs (let [stratum (nth strata i)
    this-rels (reduce (fn [acc r] (conj acc (:rel (:head r)))) #{} stratum)
-   bad (filterv (fn [nl] (not (or (= "triple" (:rel nl)) (or (= "claim" (:rel nl)) (contains? lower (:rel nl)))))) (neg-lits stratum))
-   probs2 (vec (concat probs (mapv (fn [nl] (str "stratum " i ": negated '" (:rel nl) "' is not EDB or a lower stratum")) bad)))]
+   bad-fwd (filterv (fn [nl] (not (or (= "triple" (:rel nl)) (or (= "claim" (:rel nl)) (contains? lower (:rel nl)))))) (neg-lits stratum))
+   bad-self (filterv (fn [nl] (contains? this-rels (:rel nl))) (neg-lits stratum))
+   probs2 (vec (concat probs (concat (mapv (fn [nl] (str "stratum " i ": negated '" (:rel nl) "' is not EDB or a lower stratum")) bad-fwd) (mapv (fn [nl] (str "stratum " i ": negated '" (:rel nl) "' is also derived in the SAME stratum (recursion through negation — not stratifiable)")) bad-self))))]
   (recur (+ i 1) (reduce (fn [acc rel] (conj acc rel)) lower this-rels) probs2)))))
 
 (defn facts [db ^String rel]
