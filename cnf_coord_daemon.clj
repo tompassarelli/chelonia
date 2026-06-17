@@ -159,10 +159,16 @@
 ;; is an SSLServerSocket that REQUIRES + verifies a client cert (mutual TLS), so a
 ;; non-loopback link is safe over an untrusted network. Unset => plaintext (default,
 ;; unchanged). The EDN wire protocol is identical inside the TLS session.
+;; password from FRAM_TLS_PASS, or read from FRAM_TLS_PASS_FILE (Docker/k8s secrets
+;; mount as files — keeps the secret out of the process environ for multi-tenant hosts).
+(defn- tls-pass []
+  (or (System/getenv "FRAM_TLS_PASS")
+      (when-let [f (System/getenv "FRAM_TLS_PASS_FILE")] (str/trim (slurp f)))))
+
 (defn- tls-cfg []
   (let [ks (System/getenv "FRAM_TLS_KEYSTORE")
         ts (System/getenv "FRAM_TLS_TRUSTSTORE")
-        pass (System/getenv "FRAM_TLS_PASS")]
+        pass (tls-pass)]
     ;; fail CLOSED: a partial config (typo / missing var / secrets-manager glitch)
     ;; must NOT silently serve plaintext where mTLS was intended.
     (when (and (or ks ts pass) (not (and ks ts pass)))
@@ -351,7 +357,8 @@
           fails (remove second checks)]
       (doseq [[nm ok] checks] (println (if ok "  [PASS] " "  [FAIL] ") nm))
       (if (empty? fails)
-        (println "\nStage 7 (daemon): reified coordinator over the socket —" (count checks) "/" (count checks) "PASS")
+        (do (println "\nStage 7 (daemon): reified coordinator over the socket —" (count checks) "/" (count checks) "PASS")
+            (System/exit 0))   ; exit cleanly so the test frees the listener port (don't leak it)
         (do (println "\nStage 7 (daemon):" (count fails) "FAILED") (System/exit 1))))))
 
 (let [[cmd p log flat] *command-line-args*]

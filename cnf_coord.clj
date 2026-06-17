@@ -24,7 +24,7 @@
 ;;
 ;;   bb -cp out cnf_coord.clj test
 ;; ============================================================================
-(require '[fram.cnf :as c] '[fram.schema :as s]
+(require '[fram.cnf :as c] '[fram.schema :as s] '[fram.kernel :as ck]
          '[clojure.edn :as edn] '[clojure.java.io :as io] '[clojure.string :as str])
 
 (defn- store [co] (:store co))
@@ -109,7 +109,7 @@
           te0    (s/resolve-name (store co) te-name)
           tgt0   (when (= kind :link) (s/resolve-name (store co) r-spec))
           vid    (when (= kind :assert) (c/value-id (store co) r-spec))
-          single (= "single" (s/cardinality (store co) pred))
+          single (or (= "single" (s/cardinality (store co) pred)) (ck/single? pred))
           bv     (if (and te0 pid) (base-version co te0 pid) 0)
           live   (if (and te0 pid) (live-cids-lp co te0 pid) [])
           claims (:claims @(store co))]
@@ -147,7 +147,7 @@
   (locking (:lock co)
     (let [pid    (c/value-id (store co) pred)
           te0    (s/resolve-name (store co) te-name)
-          single (= "single" (s/cardinality (store co) pred))]
+          single (or (= "single" (s/cardinality (store co) pred)) (ck/single? pred))]
       (if (or (nil? te0) (nil? pid))
         {:ok (current-seq co)}                              ; nothing to retract
         (let [bv (base-version co te0 pid)]

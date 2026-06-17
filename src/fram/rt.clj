@@ -234,7 +234,9 @@
   (let [h (System/getenv "FRAM_CONNECT")] (if (str/blank? h) "127.0.0.1" h)))
 
 (defn- coord-socket [host port]
-  (let [ks (System/getenv "FRAM_TLS_KEYSTORE") ts (System/getenv "FRAM_TLS_TRUSTSTORE") pass (System/getenv "FRAM_TLS_PASS")]
+  (let [ks (System/getenv "FRAM_TLS_KEYSTORE") ts (System/getenv "FRAM_TLS_TRUSTSTORE")
+        pass (or (System/getenv "FRAM_TLS_PASS")
+                 (when-let [f (System/getenv "FRAM_TLS_PASS_FILE")] (str/trim (slurp f))))]
     ;; fail CLOSED on a partial config — a typo'd/missing var must NOT silently
     ;; downgrade a "secure" link to plaintext.
     (when (and (or ks ts pass) (not (and ks ts pass)))
