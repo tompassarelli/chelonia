@@ -147,6 +147,10 @@
 
 (defn now-ts [] (str (java.time.Instant/now)))
 
+;; parse an EDN string from the CLI (a `query`/`call` argument) into data;
+;; nil on parse failure so the caller can report it instead of crashing.
+(defn parse-edn [s] (try (edn/read-string s) (catch Exception _ nil)))
+
 (defn read-log [path]
   (if (.exists (io/file path))
     (->> (str/split-lines (clojure.core/slurp path))
@@ -212,6 +216,11 @@
 (defn- coord-rt [port req]
   (with-open [s (java.net.Socket.)]
     (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int port)) 2000)
+    ;; read deadline too — else a process that ACCEPTS the port but never replies
+    ;; (wrong protocol / hung daemon) blocks .readLine forever. SocketTimeoutException
+    ;; is caught by coord-version (-> -1) and coord-write (-> error string), so this
+    ;; degrades to the same clean "no coordinator" path as connection-refused.
+    (.setSoTimeout s 2000)
     (let [w (io/writer (.getOutputStream s))
           r (io/reader (.getInputStream s))]
       (.write w (str (pr-str req) "\n"))

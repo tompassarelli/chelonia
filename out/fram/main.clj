@@ -5,6 +5,8 @@
             [fram.import :as imp]
             [fram.export :as exp]
             [clojure.string :as str]
+            [fram.tools :as tl]
+            [fram.query :as q]
             [fram.rt :as rt]))
 
 (defn- ^String short-id [^String te]
@@ -100,7 +102,7 @@
    rv (if (or (= pred "depends_on") (= pred "part_of") (= pred "relates_to")) (str "@" value) value)
    resp (tell-retry (fram.rt/coord-port) op te pred rv 5)]
   (cond
-  (= resp "nodaemon") (println "no coordinator on 127.0.0.1:7977 — run `fram serve`, or use `set` (single-writer)")
+  (= resp "nodaemon") (println (str "no coordinator on 127.0.0.1:" (fram.rt/coord-port) " — start it with bin/fram-up, or use `set` (single-writer)"))
   (= resp "conflict") (println "rejected: write conflict after retries (another agent is racing this id+pred)")
   (str/starts-with? resp "ok:") (println (str "committed via coordinator (v" (subs resp 3) "): " id " " pred " = " rv))
   :else (println (str "REJECTED by coordinator: " resp)))))
@@ -110,7 +112,46 @@
   (println (str "watching coordinator on 127.0.0.1:" port " — Ctrl-C to stop"))
   (fram.rt/coord-watch port)))
 
-(defn run [args ^String threads-dir ^String log]
+(defn cmd-tools [^String log]
+  (let [claims (:claims (fold/fold (fram.rt/read-log log)))
+   cat (tl/catalog claims)]
+  (println (str (count cat) " tools (generated from the claim vocabulary):"))
+  (doseq [spec cat]
+  (println (str "  " (:name spec) "  —  " (:desc spec))))))
+
+(defn- print-rows [rows]
+  (if (empty? rows) (println "  (no results)") (doseq [r rows]
+  (println (str "  " r)))))
+
+(defn- route-write [w]
+  (let [resp (tell-retry (fram.rt/coord-port) (:op w) (:l w) (:p w) (:r w) 5)]
+  (cond
+  (= resp "nodaemon") (println (str "no coordinator on 127.0.0.1:" (fram.rt/coord-port) " — start it with bin/fram-up"))
+  (= resp "conflict") (println "rejected: write conflict after retries")
+  (str/starts-with? resp "ok:") (println (str "committed (v" (subs resp 3) "): " (:l w) " " (:p w) " = " (:r w) " [" (:op w) "]"))
+  :else (println (str "REJECTED by coordinator: " resp)))))
+
+(defn cmd-call [^String log ^String tool ^String edn]
+  (let [args (fram.rt/parse-edn edn)]
+  (if (nil? args) (println (str "bad EDN args: " edn)) (let [claims (:claims (fold/fold (fram.rt/read-log log)))
+   idx (k/build-index claims)
+   cat (tl/catalog claims)
+   res (tl/call claims idx cat tool args)]
+  (cond
+  (some? (:error res)) (doseq [e (:error res)]
+  (println (str "  error: " e)))
+  (some? (:write res)) (route-write (:write res))
+  (some? (:ok res)) (print-rows (:ok res))
+  :else (print-rows (:rows res)))))))
+
+(defn cmd-query [^String log ^String edn]
+  (let [qd (fram.rt/parse-edn edn)]
+  (if (nil? qd) (println (str "bad EDN query: " edn)) (let [claims (:claims (fold/fold (fram.rt/read-log log)))
+   res (q/run claims qd)]
+  (if (some? (:error res)) (doseq [e (:error res)]
+  (println (str "  error: " e))) (print-rows (:ok res)))))))
+
+(defn dispatch [args ^String threads-dir ^String log]
   (let [cmd (if (empty? args) "" (first args))]
   (cond
   (= cmd "import") (cmd-import threads-dir log (and (> (count args) 1) (= (nth args 1) "--force")))
@@ -119,11 +160,14 @@
   (= cmd "watch") (cmd-watch)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "history") (if (> (count args) 1) (fram.rt/history log (nth args 1)) (println "usage: history <id>"))
+  (= cmd "tools") (cmd-tools log)
+  (= cmd "query") (if (> (count args) 1) (cmd-query log (nth args 1)) (println "usage: query '<edn>'  e.g. '{:find \"reaches\" :rules [...]}'"))
+  (= cmd "call") (if (>= (count args) 3) (cmd-call log (nth args 1) (nth args 2)) (println "usage: call <tool> '<edn-args>'   (run `tools` for the catalog)"))
   (= cmd "set") (if (>= (count args) 4) (cmd-set log (nth args 1) (nth args 2) (nth args 3)) (println "usage: set <id> <pred> <value>"))
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "fram (engine) usage: import | export <out-dir> | show <id> | history <id> | validate | watch | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>"))))
+  :else (println "fram (engine) usage: import | export <out-dir> | show <id> | history <id> | validate | watch | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to> | tools | query <edn> | call <tool> <edn>"))))
 
 (defn -main [& args]
-  (run (vec args) (fram.rt/threads-dir) (fram.rt/log-path)))
+  (dispatch (vec args) (fram.rt/threads-dir) (fram.rt/log-path)))

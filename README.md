@@ -118,6 +118,42 @@ integrity (`validate`) is kernel-level; lifecycle projections live in the
 consumer. Honest framing: proven under local test load, single machine — not
 distributed consensus.
 
+## AI-native: tools, not a query DSL
+
+The primary query author here is a model, not a person — so the surface is tuned
+for *what a model emits correctly with zero examples*, not human terseness. That
+points away from any bespoke query language and toward two surfaces:
+
+- **A tool catalog generated from the claim vocabulary.** For each predicate `P`
+  (cardinality from the kernel's single-valued vocabulary — `FRAM_SINGLE_VALUED`
+  or its fallback — ref-vs-literal by the `@` convention): `P-of` / `P-list` read
+  it, `set-P` / `add-P` / `remove-P` write it (through the coordinator), and for
+  reference predicates `P-from` walks the reverse edge — plus structural
+  `threads` / `show` / `dependents-of` / `validate`. The priors live in the
+  *names* (`owner-of`, `depends_on-from`); the model fills **typed params** and a
+  missing required param is **rejected server-side**, so it can't emit a broken
+  call, and correctness lives in the engine, not the model. Point Fram at a
+  different corpus and the catalog regenerates — the engine ships no domain tools
+  of its own.
+- **`query` — a structured Datalog *escape hatch*** for the rare multi-hop
+  question no named tool covers. The model emits **data**, not text:
+  `{:find R :rules [{:head {:rel R :args [terms]} :body [{:rel r :args [terms] :neg b}]}]}`
+  (a term is `{:var "x"}` or a constant; base relations are `triple`/`claim`).
+  That shape *is* the engine's internal rule data, so the only added layer is
+  **validation at the boundary** — a *total* check that runs before anything else:
+  it can't parse-fail (data, not text), can't reference an undefined relation,
+  can't ground an **unbound head variable**, can't **shadow a base relation**, and
+  unstratified negation is rejected. It then executes on the same fixpoint
+  (recursion + stratified negation), **no query-library dependency**. (Evaluation
+  is naive, so a deeply recursive query can be *expensive* — the MCP path bounds it
+  with a time budget; the CLI runs it unbounded.)
+
+Both are served over **MCP** (`bin/fram-mcp` — JSON-RPC over stdio): point a
+model's MCP client at it and it gets the generated catalog + the structured
+`query` tool, reads off the live fold, writes through the coordinator. The CLI
+(`fram tools` / `fram call <tool> <edn>` / `fram query <edn>`) is the same surface
+for humans.
+
 ## Self-host it, or host it for others
 
 **You choose where the authority runs — and you can always leave with your data.**
@@ -173,10 +209,11 @@ bin/fram tell <id> committed 2026-06-17   # writes go through the coordinator (s
 
 Engine command surface: `import · export <dir> · show <id> · history <id> ·
 validate · watch · set <id> <pred> <val> · tell <id> <pred> <val> ·
-untell <id> <pred> <val> · merge <from> <to>`, plus the daemon (`bin/fram-daemon`,
-`bin/fram-up`). The life
-verbs (`ready` / `blocked` / `leverage` / `next` / `capture` / `agenda`) are a
-consumer's, not the engine's.
+untell <id> <pred> <val> · merge <from> <to>`, the AI-facing surface
+(`tools · query <edn> · call <tool> <edn>`, also over MCP via `bin/fram-mcp`),
+plus the daemon (`bin/fram-daemon`, `bin/fram-up`). The life verbs (`ready` /
+`blocked` / `leverage` / `next` / `capture` / `agenda`) are a consumer's, not the
+engine's.
 
 ## Built on Beagle
 
@@ -195,6 +232,9 @@ bb -cp out cnf_coord_test.clj    # adversarial concurrency + durability suite
 bb -cp out schema_test.clj       # predicate vocab: cardinality + value-kind
 bb -cp out datalog_test.clj      # stratified derivation
 bb -cp out cnf_test.clj          # reified claim kernel
+bb -cp out query_test.clj        # structured Datalog query + boundary rejections
+bb -cp out tools_test.clj        # tool catalog generated from the vocabulary
+bb mcp_test.clj                  # bin/fram-mcp end to end over JSON-RPC/stdio
 ```
 
 ## License

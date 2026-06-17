@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Fram MCP server — the AI-facing edge of one instance. Speaks MCP (JSON-RPC 2.0
+# over stdio) and serves the tool catalog generated from the current log's claim
+# vocabulary (fram.tools) plus the structured `query` escape hatch (fram.query).
+# Reads fold the log; writes route through the coordinator. Point a model's MCP
+# client at this command.
+#
+#   FRAM_THREADS / FRAM_LOG select the corpus (same vars the CLI reads).
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+export FRAM_THREADS="${FRAM_THREADS:-$HERE/threads}"
+export FRAM_LOG="${FRAM_LOG:-$HERE/claims.log}"
+cd "$HERE" && exec bb -cp out fram_mcp.clj

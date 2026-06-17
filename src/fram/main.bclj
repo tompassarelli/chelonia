@@ -10,6 +10,8 @@
 (require fram.import :as imp)
 (require fram.export :as exp)
 (require clojure.string :as str)
+(require fram.tools :as tl)
+(require fram.query :as q)
 (require fram.rt)   ; load the clj runtime the externs below bind to
 
 (declare-extern fram.rt/read-log [String -> (Vec fold/Assertion)])
@@ -27,6 +29,7 @@
 (declare-extern fram.rt/coord-status [Int -> String])
 (declare-extern fram.rt/coord-watch [Int -> Nil])
 (declare-extern fram.rt/history [String String -> Nil])
+(declare-extern fram.rt/parse-edn [String -> Any])
 
 ;; --- display helpers --------------------------------------------------------
 
@@ -166,7 +169,7 @@
         resp (tell-retry (fram.rt/coord-port) op te pred rv 5)]
     (cond
       [(= resp "nodaemon")
-       (println "no coordinator on 127.0.0.1:7977 — run `fram serve`, or use `set` (single-writer)")]
+       (println (str "no coordinator on 127.0.0.1:" (fram.rt/coord-port) " — start it with bin/fram-up, or use `set` (single-writer)"))]
       [(= resp "conflict")
        (println "rejected: write conflict after retries (another agent is racing this id+pred)")]
       [(str/starts-with? resp "ok:")
@@ -179,9 +182,61 @@
     (println (str "watching coordinator on 127.0.0.1:" port " — Ctrl-C to stop"))
     (fram.rt/coord-watch port)))
 
+;; --- AI-facing tool surface (catalog + dispatch; see fram.tools / fram.query) -
+;; The catalog is generated from the claim vocabulary; `query` is the structured
+;; Datalog escape hatch (fram.query). The MCP server (bin/fram-mcp) serves the
+;; SAME catalog + dispatch over JSON; this CLI is the human/test path (EDN args).
+
+(defn cmd-tools [log :- String] :- Nil
+  (let [claims (:claims (fold/fold (fram.rt/read-log log)))
+        cat (tl/catalog claims)]
+    (println (str (count cat) " tools (generated from the claim vocabulary):"))
+    (doseq [spec cat]
+      (println (str "  " (:name spec) "  —  " (:desc spec))))))
+
+(defn- print-rows [rows :- Any] :- Nil
+  (if (empty? rows)
+    (println "  (no results)")
+    (doseq [r rows] (println (str "  " r)))))
+
+;; route a tool's write-intent {:op :l :p :r} through the coordinator (reuses the
+;; same serialized, rule-checked path as `tell`).
+(defn- route-write [w :- Any] :- Nil
+  (let [resp (tell-retry (fram.rt/coord-port) (:op w) (:l w) (:p w) (:r w) 5)]
+    (cond
+      [(= resp "nodaemon") (println (str "no coordinator on 127.0.0.1:" (fram.rt/coord-port) " — start it with bin/fram-up"))]
+      [(= resp "conflict") (println "rejected: write conflict after retries")]
+      [(str/starts-with? resp "ok:")
+       (println (str "committed (v" (subs resp 3) "): " (:l w) " " (:p w) " = " (:r w) " [" (:op w) "]"))]
+      [:else (println (str "REJECTED by coordinator: " resp))])))
+
+(defn cmd-call [log :- String tool :- String edn :- String] :- Nil
+  (let [args (fram.rt/parse-edn edn)]
+    (if (nil? args)
+      (println (str "bad EDN args: " edn))
+      (let [claims (:claims (fold/fold (fram.rt/read-log log)))
+            idx (k/build-index claims)
+            cat (tl/catalog claims)
+            res (tl/call claims idx cat tool args)]
+        (cond
+          [(some? (:error res)) (doseq [e (:error res)] (println (str "  error: " e)))]
+          [(some? (:write res)) (route-write (:write res))]
+          [(some? (:ok res))    (print-rows (:ok res))]
+          [:else                (print-rows (:rows res))])))))
+
+(defn cmd-query [log :- String edn :- String] :- Nil
+  (let [qd (fram.rt/parse-edn edn)]
+    (if (nil? qd)
+      (println (str "bad EDN query: " edn))
+      (let [claims (:claims (fold/fold (fram.rt/read-log log)))
+            res (q/run claims qd)]
+        (if (some? (:error res))
+          (doseq [e (:error res)] (println (str "  error: " e)))
+          (print-rows (:ok res)))))))
+
 ;; --- dispatch (engine verbs only) -------------------------------------------
 
-(defn run [args :- (Vec String) threads-dir :- String log :- String] :- Nil
+(defn dispatch [args :- (Vec String) threads-dir :- String log :- String] :- Nil
   (let [cmd (if (empty? args) "" (first args))]
     (cond
       [(= cmd "import")
@@ -197,6 +252,15 @@
        (if (> (count args) 1)
          (fram.rt/history log (nth args 1))
          (println "usage: history <id>"))]
+      [(= cmd "tools")    (cmd-tools log)]
+      [(= cmd "query")
+       (if (> (count args) 1)
+         (cmd-query log (nth args 1))
+         (println "usage: query '<edn>'  e.g. '{:find \"reaches\" :rules [...]}'"))]
+      [(= cmd "call")
+       (if (>= (count args) 3)
+         (cmd-call log (nth args 1) (nth args 2))
+         (println "usage: call <tool> '<edn-args>'   (run `tools` for the catalog)"))]
       [(= cmd "set")
        (if (>= (count args) 4)
          (cmd-set log (nth args 1) (nth args 2) (nth args 3))
@@ -213,7 +277,7 @@
        (if (>= (count args) 4)
          (cmd-tell "retract" (nth args 1) (nth args 2) (nth args 3))
          (println "usage: untell <id> <pred> <value>"))]
-      [:else (println "fram (engine) usage: import | export <out-dir> | show <id> | history <id> | validate | watch | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to>")])))
+      [:else (println "fram (engine) usage: import | export <out-dir> | show <id> | history <id> | validate | watch | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to> | tools | query <edn> | call <tool> <edn>")])))
 
 (defn -main [& args] :- Nil
-  (run (vec args) (fram.rt/threads-dir) (fram.rt/log-path)))
+  (dispatch (vec args) (fram.rt/threads-dir) (fram.rt/log-path)))
