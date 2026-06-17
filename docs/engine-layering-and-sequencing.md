@@ -149,3 +149,27 @@ the app-level mirror of the `mod_a`/`mod_b` scope-correctness receipt.
   first-class gate properties. **Continue it.**
 - The latent-bug ledger (`beagle/docs/text-as-source-latent-bugs.md`) is the
   evidence stream for the reasoning/repair thesis — keep logging.
+
+## Layer-2 boundary — verified (2026-06-18)
+
+The layering **principle** (Beagle the language stays clean; the graph engine is
+separate) is **satisfied and verified**, distinct from the physical repo question:
+
+- **Language core is clean.** parse / check / emit-clj / emit-js / emit-nix / types
+  / ast carry **zero** graph-engine machinery — the only `claim` mentions are
+  tombstone comments for the *removed* `(claim …)`/`:` surface form. `emit-claims.rkt`
+  is the `'claims` emit *target* (a backend, like emit-js); `claims-roundtrip.rkt` is
+  source round-trip + the byte-stable formatter (a language/formatting concern). So
+  no graph machinery is bolted into the language.
+- **The code-intelligence ENGINE is Layer 2 and lives in chartroom:** the `refers_to`
+  lexical resolver + scope-correct rename (`resolve.clj`), the namespace-correct call
+  graph (`chartroom.clj`). Beagle's gates *rent* it (the scope-correct-rename gate
+  drives chartroom's resolver) — a consumer using the engine, not the language owning
+  it. That's the layering working as intended.
+- **The repair/reasoning TOOLING in `beagle/bin`** (cascade, callgraph, the
+  code-as-claims gates) is separate scripts that depend on Fram — not in the compiler.
+  A *physical* relocation to a dedicated repo is **org churn the principle does not
+  require** (the language is already clean) and would risk breaking beagle's dev loop
+  + CI gates + `beagle-repair` refs + raco links for marginal benefit. So the honest
+  call: the boundary is clean and verified; a repo-split is a separate, deliberate
+  migration to scope on its own merits, not a cleanliness fix.
