@@ -163,6 +163,12 @@
   (let [ks (System/getenv "FRAM_TLS_KEYSTORE")
         ts (System/getenv "FRAM_TLS_TRUSTSTORE")
         pass (System/getenv "FRAM_TLS_PASS")]
+    ;; fail CLOSED: a partial config (typo / missing var / secrets-manager glitch)
+    ;; must NOT silently serve plaintext where mTLS was intended.
+    (when (and (or ks ts pass) (not (and ks ts pass)))
+      (binding [*out* *err*]
+        (println "FATAL: FRAM_TLS_* partially set — need ALL of FRAM_TLS_KEYSTORE / FRAM_TLS_TRUSTSTORE / FRAM_TLS_PASS (refusing to serve plaintext)"))
+      (System/exit 2))
     (when (and ks ts pass) {:ks ks :ts ts :pass pass})))
 
 (defn- load-keystore [path pw]

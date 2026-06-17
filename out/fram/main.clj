@@ -113,6 +113,11 @@
   (println (str "watching coordinator on 127.0.0.1:" port " — Ctrl-C to stop"))
   (fram.rt/coord-watch port)))
 
+(defn cmd-doctor []
+  (let [port (fram.rt/coord-port)
+   v (fram.rt/coord-version port)]
+  (if (>= v 0) (println (str "coordinator UP on 127.0.0.1:" port " (v" v ")")) (println (str "coordinator DOWN on 127.0.0.1:" port " — start it with bin/fram-up")))))
+
 (defn cmd-tools [^String log]
   (let [claims (:claims (fold/fold (fram.rt/read-log log)))
    cat (tl/catalog claims)]
@@ -159,6 +164,7 @@
   (= cmd "export") (if (> (count args) 1) (cmd-export threads-dir log (nth args 1)) (println "usage: export <out-dir>"))
   (= cmd "validate") (cmd-validate log)
   (= cmd "watch") (cmd-watch)
+  (= cmd "doctor") (cmd-doctor)
   (= cmd "show") (cmd-show log (if (> (count args) 1) (nth args 1) ""))
   (= cmd "history") (if (> (count args) 1) (fram.rt/history log (nth args 1)) (println "usage: history <id>"))
   (= cmd "tools") (cmd-tools log)
@@ -168,7 +174,7 @@
   (= cmd "merge") (if (>= (count args) 3) (cmd-merge log (nth args 1) (nth args 2)) (println "usage: merge <from-entity> <to-entity>"))
   (= cmd "tell") (if (>= (count args) 4) (cmd-tell log "assert" (nth args 1) (nth args 2) (nth args 3)) (println "usage: tell <id> <pred> <value>"))
   (= cmd "untell") (if (>= (count args) 4) (cmd-tell log "retract" (nth args 1) (nth args 2) (nth args 3)) (println "usage: untell <id> <pred> <value>"))
-  :else (println "fram (engine) usage: import | export <out-dir> | show <id> | history <id> | validate | watch | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to> | tools | query <edn> | call <tool> <edn>"))))
+  :else (println "fram (engine) usage: import | export <out-dir> | show <id> | history <id> | validate | watch | doctor | set <id> <pred> <value> | tell <id> <pred> <value> | untell <id> <pred> <value> | merge <from> <to> | tools | query <edn> | call <tool> <edn>"))))
 
 (defn -main [& args]
   (dispatch (vec args) (fram.rt/threads-dir) (fram.rt/log-path)))

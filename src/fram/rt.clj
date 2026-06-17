@@ -230,8 +230,17 @@
 
 ;; connect to the coordinator: FRAM_CONNECT host (default 127.0.0.1); mutual TLS when
 ;; FRAM_TLS_* is set, else plaintext (the unchanged loopback default).
+(defn- connect-host []
+  (let [h (System/getenv "FRAM_CONNECT")] (if (str/blank? h) "127.0.0.1" h)))
+
 (defn- coord-socket [host port]
   (let [ks (System/getenv "FRAM_TLS_KEYSTORE") ts (System/getenv "FRAM_TLS_TRUSTSTORE") pass (System/getenv "FRAM_TLS_PASS")]
+    ;; fail CLOSED on a partial config — a typo'd/missing var must NOT silently
+    ;; downgrade a "secure" link to plaintext.
+    (when (and (or ks ts pass) (not (and ks ts pass)))
+      (binding [*out* *err*]
+        (println "FATAL: FRAM_TLS_* partially set — need ALL of FRAM_TLS_KEYSTORE / FRAM_TLS_TRUSTSTORE / FRAM_TLS_PASS (refusing to connect in plaintext)"))
+      (System/exit 2))
     (if (and ks ts pass)
       (let [s (.createSocket (.getSocketFactory (client-ssl-context ks ts pass)))]
         (.connect s (java.net.InetSocketAddress. ^String host (int port)) 2000)
@@ -246,7 +255,7 @@
 (defn- coord-rt [port req]
   ;; read deadline (.setSoTimeout) so a process that accepts but never replies can't
   ;; hang .readLine; SocketTimeoutException degrades to the clean "no coordinator" path.
-  (with-open [s (coord-socket (or (System/getenv "FRAM_CONNECT") "127.0.0.1") port)]
+  (with-open [s (coord-socket (connect-host) port)]
     (let [w (io/writer (.getOutputStream s))
           r (io/reader (.getInputStream s))]
       (.write w (str (pr-str req) "\n"))
@@ -277,8 +286,7 @@
 
 ;; subscribe + stream commit events (one EDN line each) until disconnect
 (defn coord-watch [port]
-  (with-open [s (java.net.Socket.)]
-    (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int port)) 2000)
+  (with-open [s (coord-socket (connect-host) port)]   ; honors FRAM_CONNECT + mTLS like coord-rt
     (let [w (io/writer (.getOutputStream s))
           r (io/reader (.getInputStream s))]
       (.write w "{:op :subscribe}\n") (.flush w)
