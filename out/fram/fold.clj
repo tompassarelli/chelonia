@@ -21,8 +21,13 @@
 
 (defn fold-version [r] (:version r))
 
+(defn- tx-of [^Assertion a]
+  (let [t (:tx a)]
+  (if (int? t) t 0)))
+
 (defn- max-tx [as]
-  (reduce (fn [m a] (if (> (:tx a) m) (:tx a) m)) 0 as))
+  (reduce (fn [m a] (let [t (tx-of a)]
+  (if (> t m) t m))) 0 as))
 
 (defrecord Latest [tx op l p r frame])
 
@@ -43,8 +48,9 @@
 
 (defn- keyed-latest [asserts]
   (reduce (fn [m a] (let [k (key-of a)
-   prev (get m k)]
-  (if (and (some? prev) (> (:tx prev) (:tx a))) m (assoc m k (->Latest (:tx a) (:op a) (:l a) (:p a) (:r a) (:frame a)))))) {} asserts))
+   prev (get m k)
+   atx (tx-of a)]
+  (if (and (some? prev) (> (:tx prev) atx)) m (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a)))))) {} asserts))
 
 (defn ^Fold fold [asserts]
   (let [valid (filterv (fn [a] (and (some? (:l a)) (and (some? (:p a)) (some? (:r a))))) asserts)

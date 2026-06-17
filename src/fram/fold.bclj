@@ -9,8 +9,18 @@
 
 (defrecord Fold [claims :- (Vec k/Claim) version :- Int])
 
+;; :tx is DECLARED Int, but read-log passes (:tx m) straight through with no
+;; coercion (fram.rt/read-log), so an EDN-valid line lacking :tx (hand-edited,
+;; legacy, or partially-written) yields an Assertion whose :tx is nil at runtime.
+;; tx-of defaults a missing/non-int :tx to 0 — the SAME guard the coordinator
+;; uses on the flat log (`(or (:tx %) 0)`, cnf_coord_daemon.clj) — so a bad line
+;; is counted as tx 0 (oldest), never crashing the version high-water scan.
+(defn- tx-of [a :- Assertion] :- Int
+  (let [t :- Any (:tx a)]
+    (if (int? t) t 0)))
+
 (defn- max-tx [as :- (Vec Assertion)] :- Int
-  (reduce (fn [m :- Int a :- Assertion] :- Int (if (> (:tx a) m) (:tx a) m)) 0 as))
+  (reduce (fn [m :- Int a :- Assertion] :- Int (let [t (tx-of a)] (if (> t m) t m))) 0 as))
 
 ;; O(n) fold: collapse to the latest assertion per key in one pass (a hash map),
 ;; then emit claims. Single-valued predicates key on (l,p) — latest tx wins;
@@ -27,10 +37,11 @@
   (reduce
    (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
      (let [k (key-of a)
-           prev (get m k)]
-       (if (and (some? prev) (> (:tx prev) (:tx a)))
+           prev (get m k)
+           atx (tx-of a)]
+       (if (and (some? prev) (> (:tx prev) atx))
          m
-         (assoc m k (->Latest (:tx a) (:op a) (:l a) (:p a) (:r a) (:frame a))))))
+         (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a))))))
    {}
    asserts))
 
