@@ -37,7 +37,23 @@ These gaps don't just sit in a doc; they're being fixed in the Beagle compiler i
   kept; the map-pattern narrowing dropped). **Deferred**: map-pattern *destructuring*
   narrowing + match exhaustiveness over record-unions (need emit to bind the pattern var
   first); full row-polymorphism (the multi-week half).
-- G2 / G3 / G6 / G7 — queued (Lodestar epic `2026-06-17-190614`).
+- **G7 (`for`/`doseq` `:- T`) — SHIPPED** (beagle `a348b6a`). Parity with `loop`; the
+  annotation is honored (binds the declared type, not `Any`).
+- **G2 (`(Atom T)`) — DEFERRED (unsound the easy way).** A 2nd adversarial review caught the
+  naive impl as unsound: a *mutable* cell reused the **covariant** container rule, so
+  `(Atom Int)` aliased as `(Atom Any)` could be poisoned with a `String` while `deref` still
+  promised `Int` (classic array-covariance hole). The sound fix needs Atom compared by strict
+  type-**equality** (naive invariance fails too — `Any` is compatible with everything, so
+  `(Atom Int) ≡ (Atom Any)` would persist) **plus** uniform atom-typing in consumers — more
+  than a medium gap warrants over the sound workaround already shipped in fram (bare `Atom` =
+  `Any` + `(let [s :- Store (deref ctx)] …)`). Sound-path recorded (Lodestar `2026-06-17-190621`).
+- **G6 — SUBSUMED, no separate fix.** The `Any`-assignability hole is inherent to `Any`
+  (assignable to anything); the only remedy is reducing *upstream* `Any`, which G1/G3/G4 do.
+  Documented, not a code change.
+- **G3 (heterogeneous tuple) + G4-emit (map-pattern destructuring narrowing) — REMAINING.**
+  G3 is the most fram-valuable (converts the `(Vec Any)` tuples) and — being *immutable* —
+  doesn't hit the covariance trap that sank G2. G4-emit needs an emit change (bind the
+  pattern var) before its checker narrowing can be sound.
 
 ## Genuine Beagle gaps (prioritized — these feed the language)
 
