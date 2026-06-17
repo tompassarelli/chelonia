@@ -133,10 +133,37 @@
             (let [resp (handle req)] (.write w (pr-str resp)) (.newLine w) (.flush w))))))
     (finally (.close s))))
 
+;; bind address: loopback by default (no existing single-machine user is silently
+;; exposed); honor FRAM_BIND for gateway-fronted / cross-host deployment. The wire
+;; protocol is UNAUTHENTICATED by design (auth is the gateway's job), so a
+;; non-loopback bind is only safe behind a network boundary where the ONLY thing
+;; that can reach the port is the authenticating gateway / a firewall.
+;; Recommended cross-host value: FRAM_BIND=0.0.0.0 — binds ALL interfaces including
+;; loopback, so the local CLI + `fram-up` doctor (which connect to 127.0.0.1) keep
+;; working, and isolation is enforced by the network rather than by binding one IP.
+;; loopback-ness is decided from FRAM_BIND itself (not by introspecting the
+;; resolved InetAddress — that reflective call isn't reliable on babashka).
+(defn- bind-cfg []
+  (let [b (System/getenv "FRAM_BIND")
+        loopback? (or (nil? b) (boolean (#{"" "loopback" "127.0.0.1"} b)))]
+    {:addr (if loopback?
+             (java.net.InetAddress/getLoopbackAddress)
+             (java.net.InetAddress/getByName b))
+     :loopback? loopback?
+     :label (if loopback? "127.0.0.1" b)}))
+
 (defn serve [port]
-  (let [ss (doto (ServerSocket.) (.setReuseAddress true)
-                 (.bind (InetSocketAddress. (java.net.InetAddress/getLoopbackAddress) (int port))))]
-    (println (str "reified coordinator listening on 127.0.0.1:" port " (sole writer, loopback-only)"))
+  (let [cfg (bind-cfg)
+        addr (:addr cfg) loopback? (:loopback? cfg) label (:label cfg)
+        ss (doto (ServerSocket.) (.setReuseAddress true)
+                 (.bind (InetSocketAddress. addr (int port))))]
+    (when-not loopback?
+      (binding [*out* *err*]
+        (println (str "WARNING: coordinator bound to " label ":" port
+                      " (non-loopback). The wire protocol is UNAUTHENTICATED — it MUST sit behind "
+                      "the Lodestar gateway / a firewall; never publish this port."))))
+    (println (str "reified coordinator listening on " label ":" port
+                  (if loopback? " (sole writer, loopback-only)" " (sole writer, behind-gateway)")))
     (loop [] (let [s (.accept ss)] (future (serve-conn s)) (recur)))))
 
 (defn client [port m]
