@@ -120,19 +120,27 @@
 
 ;; --- cycles ----------------------------------------------------------------
 
+;; The ONE verified graph traversal: does any node in `frontier`, following `succ`,
+;; reach `target`? cycle?/cycle-i? (flat + indexed) AND the coordinator's pre-commit
+;; acyclicity check (over the reified store) all route through this — no second,
+;; un-verified reimplementation in the write path. `succ` + ids are caller-supplied
+;; (Any: works for flat string ids or the coordinator's reified ids). seen is a set
+;; — O(1) membership (also faster than the prior linear scan).
+(defn reachable-from? [succ :- [String -> (Vec String)] frontier :- (Vec String) target :- String] :- Bool
+  (loop [front frontier seen #{}]
+    (cond
+      [(empty? front) false]
+      [(= (first front) target) true]
+      [(contains? seen (first front)) (recur (vec (rest front)) seen)]
+      [:else (recur (vec (concat (rest front) (succ (first front))))
+                    (conj seen (first front)))])))
+
 (defn cycle? [claims :- (Vec Claim) pred :- String te :- String] :- Bool
   (let [succ (fn [x :- String] :- (Vec String)
                (if (= pred "part_of")
                  (let [pp (one claims x "part_of")] (if (some? pp) [pp] []))
                  (many claims x "depends_on")))]
-    (loop [front (succ te)
-           seen []]
-      (cond
-        [(empty? front) false]
-        [(= (first front) te) true]
-        [(vec-contains? seen (first front)) (recur (vec (rest front)) seen)]
-        [:else (recur (vec (concat (rest front) (succ (first front))))
-                      (conj seen (first front)))]))))
+    (reachable-from? succ (succ te) te)))
 
 ;; --- obligation rules ------------------------------------------------------
 
@@ -239,13 +247,7 @@
                (if (= pred "part_of")
                  (let [pp (one-i idx x "part_of")] (if (some? pp) [pp] []))
                  (many-i idx x "depends_on")))]
-    (loop [front (succ te) seen []]
-      (cond
-        [(empty? front) false]
-        [(= (first front) te) true]
-        [(vec-contains? seen (first front)) (recur (vec (rest front)) seen)]
-        [:else (recur (vec (concat (rest front) (succ (first front))))
-                      (conj seen (first front)))]))))
+    (reachable-from? succ (succ te) te)))
 
 (defn violations-i [idx :- Index te :- String] :- (Vec String)
   (let [term? (terminal-i? idx te)

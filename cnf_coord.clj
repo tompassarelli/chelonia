@@ -73,13 +73,11 @@
   (let [m @(store co)]
     (map #(:r (get (:claims m) %))
          (remove #(contains? (:superseded m) %) (get (:idx-by-lp m) [x pid])))))
+;; reachability over the reified store — routed through the kernel's ONE verified
+;; traversal (ck/reachable-from?) instead of a second hand-rolled DFS. The store
+;; supplies `succ`; the algorithm (and its correctness) lives once, in Beagle.
 (defn- reaches? [co pid from to]
-  (loop [stack [from] seen #{}]
-    (if (empty? stack) false
-        (let [x (peek stack) st (pop stack)]
-          (cond (= x to) true
-                (seen x) (recur st seen)
-                :else (recur (into st (succ co pid x)) (conj seen x)))))))
+  (ck/reachable-from? (fn [x] (succ co pid x)) [from] to))
 
 ;; --- bootstrap a coordinator (multi-store: one engine, many coordinators) ---
 (defn new-coord [log-path]

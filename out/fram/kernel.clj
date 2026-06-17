@@ -67,16 +67,19 @@
 (defn apply-retract [claims ^Claim c]
   (if (single? (:p c)) (drop-lp claims (:l c) (:p c)) (filterv (fn [x] (not (claim-eq? x c))) claims)))
 
+(defn ^Boolean reachable-from? [succ frontier ^String target]
+  (loop [front frontier
+   seen #{}]
+  (cond
+  (empty? front) false
+  (= (first front) target) true
+  (contains? seen (first front)) (recur (vec (rest front)) seen)
+  :else (recur (vec (concat (rest front) (succ (first front)))) (conj seen (first front))))))
+
 (defn ^Boolean cycle? [claims ^String pred ^String te]
   (let [succ (fn [x] (if (= pred "part_of") (let [pp (one claims x "part_of")]
   (if (some? pp) [pp] [])) (many claims x "depends_on")))]
-  (loop [front (succ te)
-   seen []]
-  (cond
-  (empty? front) false
-  (= (first front) te) true
-  (vec-contains? seen (first front)) (recur (vec (rest front)) seen)
-  :else (recur (vec (concat (rest front) (succ (first front)))) (conj seen (first front)))))))
+  (reachable-from? succ (succ te) te)))
 
 (defn violations [claims ^String te]
   (let [ids (thread-ids claims)
@@ -135,13 +138,7 @@
 (defn ^Boolean cycle-i? [^Index idx ^String pred ^String te]
   (let [succ (fn [x] (if (= pred "part_of") (let [pp (one-i idx x "part_of")]
   (if (some? pp) [pp] [])) (many-i idx x "depends_on")))]
-  (loop [front (succ te)
-   seen []]
-  (cond
-  (empty? front) false
-  (= (first front) te) true
-  (vec-contains? seen (first front)) (recur (vec (rest front)) seen)
-  :else (recur (vec (concat (rest front) (succ (first front)))) (conj seen (first front)))))))
+  (reachable-from? succ (succ te) te)))
 
 (defn violations-i [^Index idx ^String te]
   (let [term? (terminal-i? idx te)
