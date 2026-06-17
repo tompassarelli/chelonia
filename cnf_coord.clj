@@ -68,6 +68,20 @@
   (or (s/resolve-name (store co) nm)
       (let [e (c/entity! (store co))] (s/name! (store co) e nm tx) e)))
 
+;; finding #12: a brand-new predicate has NO cardinality claim, so s/cardinality
+;; defaults to "multi" — and s/link!/s/assert! only supersede a prior value when
+;; the STORE records cardinality=="single" (they don't consult ck/single?). So a
+;; kernel-single predicate that was never def-predicate!'d (e.g. one not present
+;; in the flat log at migration) would have its first write NOT supersede,
+;; accumulating duplicate live values. Before such a write, pin the store's
+;; cardinality to "single" (in the SAME tx) so the schema layer supersedes
+;; correctly. Idempotent: only fires when the kernel says single but the store
+;; doesn't already record it, so an already-defined-single predicate is untouched.
+(defn- ensure-single-cardinality! [co tx pred kind]
+  (when (and (ck/single? pred) (not= "single" (s/cardinality (store co) pred)))
+    (s/def-predicate! (store co) pred "single"
+                      (if (= kind :link) "ref" "literal") tx)))
+
 ;; --- obligation: depends_on/part_of acyclicity (pure, over resolved ids) ----
 (defn- succ [co pid x]
   (let [m @(store co)]
@@ -131,6 +145,7 @@
         (let [since (:next-id @(store co))
               tx (c/begin-tx! (store co) agent)
               te (ent! co tx te-name)]
+          (ensure-single-cardinality! co tx pred kind)   ; (#12) supersede on first single write
           (case kind
             :link   (s/link! (store co) te pred (ent! co tx r-spec) tx)
             :assert (s/assert! (store co) te pred r-spec tx))

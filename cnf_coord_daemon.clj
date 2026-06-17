@@ -32,7 +32,65 @@
 (def flat-canonical? (atom false))   ; drop-in mode: flat log is canonical, reload absorbs edits
 (def schema-preds #{"name" "cardinality" "value_kind" "cnf-supersedes"})
 
+;; ---- DoS hardening knobs (findings #2/#5/#19/#20) --------------------------
+;; Read timeout on every accepted socket — mirrors the CLIENT side (fram.rt
+;; coord-socket, 2000ms), but a touch longer so a legitimately-slow gateway
+;; round-trip isn't cut off. A slow-loris / never-sends-newline client now
+;; trips SocketTimeoutException instead of pinning a thread+socket forever.
+(def ^:const sock-read-timeout-ms 5000)
+;; Per-connection line cap — the wire protocol is one EDN line per request, so a
+;; line larger than this is malicious/buggy. Bounds BufferedReader memory growth
+;; (a no-newline client can't balloon the heap) and caps edn/read-string input.
+(def ^:const max-line-bytes (* 1024 1024))        ; 1 MiB
+;; EDN nesting bound — clojure.edn/read-string is recursive-descent and throws
+;; StackOverflowError on deep nesting (overflows ~16k deep). Reject obviously
+;; over-nested input cheaply (a count of opening delimiters) BEFORE handing it to
+;; the reader, so a deep-nest payload returns a clean {:error} instead of an Error.
+(def ^:const max-edn-depth 200)
+
 (defn- stamp [f] (let [fi (java.io.File. (str f))] (str (.lastModified fi) ":" (.length fi))))
+
+;; bounded readLine: read at most `cap` chars, stopping at newline. Returns the
+;; line (sans newline), nil at clean EOF, or throws ex-info {:type :line-too-long}
+;; if the cap is hit with no newline — so a client streaming bytes forever can
+;; neither pin the thread (setSoTimeout already bounds idle) nor exhaust the heap.
+(defn- read-line-bounded ^String [^BufferedReader r ^long cap]
+  (let [sb (StringBuilder.)]
+    (loop []
+      (let [ch (.read r)]
+        (cond
+          (= ch -1)  (when (pos? (.length sb)) (.toString sb))   ; EOF: partial -> return, empty -> nil
+          (= ch 10)  (.toString sb)                              ; \n terminates the line
+          (= ch 13)  (recur)                                     ; ignore \r (CRLF)
+          :else      (do (when (>= (.length sb) cap)
+                           (throw (ex-info "line too long" {:type :line-too-long})))
+                         (.append sb (char ch))
+                         (recur)))))))
+
+;; cheap pre-parse depth guard: the deepest run of unmatched opening delimiters.
+;; Rejecting here avoids the JVM recursive reader StackOverflowError (#5).
+(defn- edn-too-deep? [^String s]
+  (loop [i 0 depth 0 mx 0 in-str false esc false]
+    (if (>= i (.length s))
+      (> mx max-edn-depth)
+      (let [c (.charAt s i)]
+        (cond
+          esc          (recur (inc i) depth mx in-str false)
+          (and in-str (= c \\)) (recur (inc i) depth mx in-str true)
+          in-str       (recur (inc i) depth mx (not (= c \")) false)
+          (= c \")     (recur (inc i) depth mx true false)
+          (or (= c \() (= c \[) (= c \{))
+                       (let [d (inc depth)] (recur (inc i) d (max mx d) in-str false))
+          (or (= c \)) (= c \]) (= c \}))
+                       (recur (inc i) (max 0 (dec depth)) mx in-str false)
+          :else        (recur (inc i) depth mx in-str false))))))
+
+;; parse a request line defensively: bound depth, keep clojure.edn (never
+;; read-string — no #= eval), and surface a parse failure as data, not a throw.
+(defn- parse-req [^String line]
+  (when (edn-too-deep? line)
+    (throw (ex-info "edn too deep" {:type :edn-too-deep})))
+  (edn/read-string line))
 
 ;; flat-log projection: each reified commit also appends the flat {:op :l :p :r}
 ;; line the CLI's cold fold reads — so "files are pure projections of the reified
@@ -42,7 +100,13 @@
   (when @flat-log
     (with-open [os (java.io.FileOutputStream. (str @flat-log) true)]
       (.write os (.getBytes (str (pr-str {:tx seq :op op :l te :p p :r r :ts (fram.rt/now-ts) :by "coord"}) "\n") "UTF-8"))
-      (.flush os))
+      (.flush os)
+      ;; DURABILITY (finding #13): fsync the append before we acknowledge {:ok}.
+      ;; In drop-in (serve-flat) mode the v2-log append-tx!/fsync path is dead
+      ;; (:log nil), so the flat log is the ONLY durable record — without .force,
+      ;; a crash after .flush but before the OS writeback loses an already-acked
+      ;; commit. .force(true) flushes data to disk so the acked write survives.
+      (.force (.getChannel os) true))
     (reset! flat-mtime (stamp @flat-log))))
 
 ;; read-bridge: reified live view -> the flat (l p r) Claim vec build-index wants.
@@ -63,13 +127,27 @@
       (reset! cache {:index (ck/build-index (reified->claims @co)) :version v}))
     (:index @cache)))
 
+;; Subscriber delivery is BEST-EFFORT and OFF the write path (finding #3): a slow
+;; or stuck subscriber (TCP send buffer full) must NOT stall commits, which run
+;; under dlock. We hand the event to a single-threaded executor so the committing
+;; thread returns immediately; delivery happens later and a wedged subscriber only
+;; backs up the (unbounded, but commit-independent) notify queue, never dlock.
+;; A subscriber whose .write/.flush throws (or whose socket SO_TIMEOUT trips) is
+;; dropped. Single thread = events stay ordered.
+(def ^:private notify-exec
+  (java.util.concurrent.Executors/newSingleThreadExecutor
+   (reify java.util.concurrent.ThreadFactory
+     (newThread [_ r] (doto (Thread. r "cnf-notify") (.setDaemon true))))))
+
 (defn- notify-subs! [event]
   (let [line (str (pr-str event) "\n")]
-    (reset! subscribers
-            (vec (filter (fn [w]
-                           (try (.write ^BufferedWriter w line) (.flush ^BufferedWriter w) true
-                                (catch Exception _ false)))
-                         @subscribers)))))
+    (.execute notify-exec
+      (fn []
+        (reset! subscribers
+                (vec (filter (fn [w]
+                               (try (.write ^BufferedWriter w line) (.flush ^BufferedWriter w) true
+                                    (catch Throwable _ false)))
+                             @subscribers)))))))
 
 ;; kind from the value: @-prefixed => ref (link), else literal (assert) — exactly
 ;; the convention the migration loader used, so daemon writes stay consistent with
@@ -122,18 +200,38 @@
       {:error "unknown op"})))
 
 ;; ---- socket server (verbatim shape from the proven coord.clj) ---------------
+;; Hardened (findings #2/#5/#19/#20): every accepted socket gets a read timeout
+;; (no slow-loris), the request line is read with a hard byte cap (no heap
+;; balloon), and the WHOLE handler is wrapped to catch Throwable — including
+;; StackOverflowError from a deep-nested EDN payload — so a malformed/hostile
+;; request returns a clean {:error} line (or just drops the conn) instead of
+;; killing the per-connection thread. A reply is best-effort: if writing it also
+;; throws (socket already gone), we still hit the finally and close.
+(defn- try-reply [^BufferedWriter w resp]
+  (try (.write w (pr-str resp)) (.newLine w) (.flush w) (catch Throwable _ nil)))
+
 (defn serve-conn [^Socket s]
   (try
+    (.setSoTimeout s sock-read-timeout-ms)         ; bound idle/slow-loris reads
     (let [r (BufferedReader. (InputStreamReader. (.getInputStream s)))
           w (BufferedWriter. (OutputStreamWriter. (.getOutputStream s)))]
-      (when-let [line (.readLine r)]
-        (let [req (edn/read-string line)]
-          (if (= (:op req) :subscribe)
-            (do (swap! subscribers conj w)
-                (.write w (pr-str {:subscribed (current-seq @co)})) (.newLine w) (.flush w)
-                (loop [] (when (.readLine r) (recur))))
-            (let [resp (handle req)] (.write w (pr-str resp)) (.newLine w) (.flush w))))))
-    (finally (.close s))))
+      (try
+        (when-let [line (read-line-bounded r max-line-bytes)]
+          (let [req (parse-req line)]
+            (if (= (:op req) :subscribe)
+              (do (swap! subscribers conj w)
+                  (.write w (pr-str {:subscribed (current-seq @co)})) (.newLine w) (.flush w)
+                  ;; keep the subscriber socket open; bounded reads guard idle drift
+                  (loop [] (when (read-line-bounded r max-line-bytes) (recur))))
+              (let [resp (handle req)] (try-reply w resp)))))
+        ;; StackOverflowError is an Error (not Exception); catching Throwable here
+        ;; keeps a deep-nest / malformed line from taking down the conn thread.
+        (catch java.net.SocketTimeoutException _ nil)   ; slow client: just close
+        (catch Throwable t
+          (try-reply w {:error (str "bad request: "
+                                    (or (:type (ex-data t)) (.. t getClass getSimpleName)))}))))
+    (catch Throwable _ nil)
+    (finally (try (.close s) (catch Throwable _ nil)))))
 
 ;; bind address: loopback by default (no existing single-machine user is silently
 ;; exposed); honor FRAM_BIND for gateway-fronted / cross-host deployment. The wire
@@ -300,12 +398,22 @@
   (index!) @co)
 
 ;; absorb external edits (capture/import/set append to the flat log out-of-band).
+;; HOT-PATH cost (finding #4): the per-request work is ONLY a cheap (stamp ...)
+;; (one File.lastModified + File.length stat) compared against the last-seen
+;; stamp. The O(n) migrate-flat->co rebuild runs ONLY when that stamp actually
+;; changed — never on an unchanged log — so a stream of pure reads/writes with no
+;; external append pays a stat, not a rebuild. We stat once and reuse it to set
+;; flat-mtime, so a fresh stat is not taken twice per reload. (Reload stays under
+;; dlock by necessity: swapping `co`/`cache` atomically against concurrent
+;; writers is what keeps the live view and the OCC base versions coherent.)
 (defn maybe-reload! []
-  (when (and @flat-canonical? @flat-log (not= (stamp @flat-log) @flat-mtime))
-    (reset! co (migrate-flat->co @flat-log))
-    (reset! flat-mtime (stamp @flat-log))
-    (reset! cache {:index nil :version -1})
-    (index!)))
+  (when (and @flat-canonical? @flat-log)
+    (let [st (stamp @flat-log)]
+      (when (not= st @flat-mtime)
+        (reset! co (migrate-flat->co @flat-log))
+        (reset! flat-mtime st)
+        (reset! cache {:index nil :version -1})
+        (index!)))))
 
 (defn serve-flat-daemon [port flat]
   (boot-flat! flat)
