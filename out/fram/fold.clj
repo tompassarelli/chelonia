@@ -25,7 +25,7 @@
   (let [t (:tx a)]
   (if (int? t) t 0)))
 
-(defn- max-tx [as]
+(defn max-tx [as]
   (reduce (fn [m a] (let [t (tx-of a)]
   (if (> t m) t m))) 0 as))
 

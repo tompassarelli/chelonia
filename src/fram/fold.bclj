@@ -19,7 +19,15 @@
   (let [t :- Any (:tx a)]
     (if (int? t) t 0)))
 
-(defn- max-tx [as :- (Vec Assertion)] :- Int
+;; PUBLIC: the cold write path (main/cmd-set) re-reads the log and uses
+;; (max-tx + 1) as the new line's tx, computed from the FRESHEST read right
+;; before append — so a later cold `set` observes an earlier one's line and
+;; strictly bumps past it. This removes the silent lost-update where two cold
+;; sets land the SAME tx on one single-valued key and the fold's >-tie-break
+;; just keeps whichever was appended last (finding #17). The fold tie-break
+;; itself stays strict-> (deterministic latest-wins); uniqueness is enforced
+;; at write time, which is where the collision was actually minted.
+(defn max-tx [as :- (Vec Assertion)] :- Int
   (reduce (fn [m :- Int a :- Assertion] :- Int (let [t (tx-of a)] (if (> t m) t m))) 0 as))
 
 ;; O(n) fold: collapse to the latest assertion per key in one pass (a hash map),

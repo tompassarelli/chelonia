@@ -70,9 +70,9 @@
    rv (tl/ref-value claims pred value)
    cand (k/apply-assert claims (k/->Claim te pred rv))
    viol (k/violations cand te)]
-  (if (not (empty? viol)) (println (str "REJECTED — " (str/join "; " viol))) (do
-  (fram.rt/append-assertion log (fold/->Assertion (+ (:version f) 1) "assert" te pred rv "cli"))
-  (println (str "ok — " id " " pred " = " rv " (v" (+ (:version f) 1) ")"))))))
+  (if (not (empty? viol)) (println (str "REJECTED — " (str/join "; " viol))) (let [tx (+ (fold/max-tx (fram.rt/read-log log)) 1)]
+  (fram.rt/append-assertion log (fold/->Assertion tx "assert" te pred rv "cli"))
+  (println (str "ok — " id " " pred " = " rv " (v" tx ")"))))))
 
 (defn- claims->assertions [claims ^String frame]
   (loop [cs claims
@@ -116,7 +116,9 @@
 (defn cmd-doctor []
   (let [port (fram.rt/coord-port)
    v (fram.rt/coord-version port)]
-  (if (>= v 0) (println (str "coordinator UP on 127.0.0.1:" port " (v" v ")")) (println (str "coordinator DOWN on 127.0.0.1:" port " — start it with bin/fram-up")))))
+  (if (>= v 0) (println (str "coordinator UP on 127.0.0.1:" port " (v" v ")")) (println (str "coordinator DOWN on 127.0.0.1:" port " — start it with bin/fram-up")))
+  (println (str "vocab " (k/vocab-fingerprint)))
+  (if (k/single-valued-from-env?) (println "vocab-source: FRAM_SINGLE_VALUED (injected)") (println (str "vocab-source: TRANSITIONAL FALLBACK — FRAM_SINGLE_VALUED is UNSET in this " "process. If the daemon and this CLI disagree on it, the cold fold and the " "daemon's store classify cardinality differently (divergent live view). " "Export the SAME FRAM_SINGLE_VALUED in every process that folds/serves this log.")))))
 
 (defn cmd-tools [^String log]
   (let [claims (:claims (fold/fold (fram.rt/read-log log)))

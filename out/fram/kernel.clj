@@ -14,6 +14,16 @@
   (loop [r xs]
   (if (empty? r) false (if (= (first r) s) true (recur (rest r))))))
 
+(defn ^Boolean single-valued-from-env? []
+  (let [env (System/getenv "FRAM_SINGLE_VALUED")]
+  (and (some? env) (not (= env "")))))
+
+(defn- ^String sorted-join [xs]
+  (str/join "," (vec (sort xs))))
+
+(defn ^String vocab-fingerprint []
+  (str "single=" (sorted-join single-valued) " |terminal=" (sorted-join terminal-preds) " |withdrawn=" (sorted-join withdrawn-preds)))
+
 (defn ^Boolean single? [^String p]
   (or (vec-contains? single-valued p) (and (string? p) (str/starts-with? p "emoji_"))))
 

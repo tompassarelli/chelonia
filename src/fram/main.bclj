@@ -112,6 +112,15 @@
         (println (str "  " (:p c) "  " (trunc (:r c) 80)))))))
 
 ;; Single-process write path: read -> fold -> apply candidate -> validate -> append.
+;; tx ASSIGNMENT (finding #17): the new line's tx is (max-tx + 1) over a FRESH
+;; re-read of the log taken right before append — NOT (:version f) from the
+;; validation fold above. Re-reading means a cold `set` that runs after another
+;; cold `set` finished appending observes that line and strictly bumps past it,
+;; so two cold sets can never land the same tx on one single-valued (l,p) key.
+;; Without this, both readers see the same version, both write version+1, and
+;; fold's strict-> tie-break silently keeps whichever was appended last — a lost
+;; update with nothing flagging the collision. (The coordinator/tell path is
+;; arbitrated by base_version; this is the bare single-writer `set` path.)
 (defn cmd-set [log :- String id :- String pred :- String value :- String] :- Nil
   (let [f (fold/fold (fram.rt/read-log log))
         claims (:claims f)
@@ -121,9 +130,9 @@
         viol (k/violations cand te)]
     (if (not (empty? viol))
       (println (str "REJECTED — " (str/join "; " viol)))
-      (do
-        (fram.rt/append-assertion log (fold/->Assertion (+ (:version f) 1) "assert" te pred rv "cli"))
-        (println (str "ok — " id " " pred " = " rv " (v" (+ (:version f) 1) ")"))))))
+      (let [tx (+ (fold/max-tx (fram.rt/read-log log)) 1)]
+        (fram.rt/append-assertion log (fold/->Assertion tx "assert" te pred rv "cli"))
+        (println (str "ok — " id " " pred " = " rv " (v" tx ")"))))))
 
 ;; --- entity merge (the dedup-sweep "fix" half) ---
 (defn- claims->assertions [claims :- (Vec k/Claim) frame :- String] :- (Vec fold/Assertion)
@@ -185,12 +194,29 @@
 
 ;; coordinator liveness probe — `fram-up` greps for "coordinator UP" to know the
 ;; daemon answered (the readiness half of the up handshake).
+;;
+;; Also prints THIS process's cardinality-vocab fingerprint + whether it came from
+;; FRAM_SINGLE_VALUED or the transitional fallback (finding #23). The vocab is
+;; frozen per-process at namespace-load from the env; a daemon and a CLI that saw
+;; different env silently classify the same predicate's cardinality differently and
+;; diverge the live view. Surfacing the fingerprint here makes a mismatch eyeball-
+;; checkable across the two processes (run `fram doctor` in each), and a no-env
+;; fallback prints a loud note instead of passing silently — the divergence is no
+;; longer silent. (Consistency requirement: every process folding/serving one log
+;; MUST load the same FRAM_SINGLE_VALUED — see fram.kernel.)
 (defn cmd-doctor [] :- Nil
   (let [port (fram.rt/coord-port)
         v (fram.rt/coord-version port)]
     (if (>= v 0)
       (println (str "coordinator UP on 127.0.0.1:" port " (v" v ")"))
-      (println (str "coordinator DOWN on 127.0.0.1:" port " — start it with bin/fram-up")))))
+      (println (str "coordinator DOWN on 127.0.0.1:" port " — start it with bin/fram-up")))
+    (println (str "vocab " (k/vocab-fingerprint)))
+    (if (k/single-valued-from-env?)
+      (println "vocab-source: FRAM_SINGLE_VALUED (injected)")
+      (println (str "vocab-source: TRANSITIONAL FALLBACK — FRAM_SINGLE_VALUED is UNSET in this "
+                    "process. If the daemon and this CLI disagree on it, the cold fold and the "
+                    "daemon's store classify cardinality differently (divergent live view). "
+                    "Export the SAME FRAM_SINGLE_VALUED in every process that folds/serves this log.")))))
 
 ;; --- AI-facing tool surface (catalog + dispatch; see fram.tools / fram.query) -
 ;; The catalog is generated from the claim vocabulary; `query` is the structured

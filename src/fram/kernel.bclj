@@ -48,6 +48,46 @@
       false
       (if (= (first r) s) true (recur (rest r))))))
 
+;; --- cardinality-config observability (finding #23) --------------------------
+;; The single-valued / terminal / withdrawn vocab is read from the env ONCE at
+;; namespace-load (the defs above). A long-lived daemon and a short-lived CLI
+;; therefore freeze WHATEVER env each saw at its own boot — and if those differ
+;; (the daemon started before FRAM_SINGLE_VALUED was exported, or with a different
+;; list) the cold fold and the daemon's reified store classify the SAME predicate's
+;; cardinality differently, diverging the replay/live view with nothing flagging it.
+;;
+;; CONSISTENCY REQUIREMENT: every process folding/serving one log MUST load the
+;; SAME FRAM_SINGLE_VALUED / FRAM_TERMINAL_PREDS / FRAM_WITHDRAWN_PREDS. The fix
+;; for the LOW finding is to make a mismatch NON-SILENT rather than to re-plumb
+;; cardinality through the log (assessed below): deriving cardinality from
+;; def-predicate!/cardinality claims would change the log format, the import path,
+;; and fold's signature (fold would need the whole claim set to find the
+;; declarations before it can key) — too large, and risky, for a LOW config-seam
+;; gap. Instead the kernel exposes a deterministic FINGERPRINT of the active
+;; vocab + whether the env (vs the transitional fallback) is in effect, and the
+;; CLI surfaces both in `doctor` so an operator can eyeball CLI-vs-daemon agreement
+;; and a no-env fallback is loud rather than silent.
+
+;; True iff FRAM_SINGLE_VALUED was actually set (so `single-valued` is the
+;; injected vocab); false means the TRANSITIONAL hardcoded fallback is live —
+;; the precise divergence vector ("daemon booted before the env was added").
+(defn single-valued-from-env? [] :- Bool
+  (let [env :- Any (System/getenv "FRAM_SINGLE_VALUED")]
+    (and (some? env) (not (= env "")))))
+
+;; Order-independent fingerprint of the ACTIVE cardinality/lifecycle vocab. Two
+;; processes with the same effective config produce the same string; any
+;; difference (extra/missing pred, or env-vs-fallback yielding a different list)
+;; produces a different string. Sorted so list-order can't make equal configs
+;; look different. This is the value an operator compares across CLI and daemon.
+(defn- sorted-join [xs :- (Vec String)] :- String
+  (str/join "," (vec (sort xs))))
+
+(defn vocab-fingerprint [] :- String
+  (str "single=" (sorted-join single-valued)
+       " |terminal=" (sorted-join terminal-preds)
+       " |withdrawn=" (sorted-join withdrawn-preds)))
+
 ;; `emoji_*` are presentation-config predicates (e.g. @ui emoji_blocked "🧱") —
 ;; single-valued by prefix so re-configuring replaces, with no per-key listing.
 (defn single? [p :- String] :- Bool
