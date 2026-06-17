@@ -53,12 +53,57 @@
   (let [head (:head r)]
   (reduce (fn [acc s] (conj acc (ground (:args head) s))) #{} (eval-body db (:body r) {}))))
 
+(defn- positive-positions [body]
+  (loop [i 0
+   ls body
+   acc []]
+  (if (empty? ls) acc (recur (+ i 1) (rest ls) (if (:neg (first ls)) acc (conj acc i))))))
+
+(defn- eval-body-pinned [db delta body pin]
+  (loop [i 0
+   ls body
+   substs [{}]]
+  (if (empty? ls) substs (let [litt (first ls)
+   src (if (:neg litt) db (if (= i pin) delta db))
+   substs2 (reduce (fn [acc s] (vec (concat acc (match-lit src litt s)))) [] substs)]
+  (recur (+ i 1) (rest ls) substs2)))))
+
+(defn- derive-rule-delta [db delta r]
+  (let [head (:head r)
+   body (:body r)]
+  (reduce (fn [acc pin] (reduce (fn [a s] (conj a (ground (:args head) s))) acc (eval-body-pinned db delta body pin))) #{} (positive-positions body))))
+
+(defn- rule-head-rels [rules]
+  (vec (reduce (fn [acc r] (conj acc (:rel (:head r)))) #{} rules)))
+
+(defn- new-only [cand db rels]
+  (reduce (fn [acc rel] (let [n (reduce (fn [s t] (if (contains? (get db rel #{}) t) s (conj s t))) #{} (get cand rel #{}))]
+  (if (empty? n) acc (assoc acc rel n)))) {} rels))
+
+(defn- db-merge [db delta rels]
+  (reduce (fn [acc rel] (let [d (get delta rel #{})]
+  (if (empty? d) acc (update acc rel (fn [s] (reduce (fn [a t] (conj a t)) (or s #{}) d)))))) db rels))
+
+(defn- ^Boolean delta-empty? [delta rels]
+  (loop [rs rels]
+  (if (empty? rs) true (if (empty? (get delta (first rs) #{})) (recur (rest rs)) false))))
+
+(defn- snr-round [db delta rules rels]
+  (let [cand (reduce (fn [acc r] (let [rel (:rel (:head r))
+   hs (derive-rule-delta db delta r)]
+  (update acc rel (fn [s] (reduce (fn [a h] (conj a h)) (or s #{}) hs))))) {} rules)]
+  (new-only cand db rels)))
+
 (defn fixpoint [db0 rules]
-  (loop [db db0]
-  (let [db2 (reduce (fn [d r] (let [rel (:rel (:head r))
-   heads (derive-rule db r)]
-  (update d rel (fn [s] (reduce (fn [acc h] (conj acc h)) (or s #{}) heads))))) db rules)]
-  (if (= db2 db) db (recur db2)))))
+  (let [rels (rule-head-rels rules)
+   seeded (reduce (fn [d r] (let [rel (:rel (:head r))
+   heads (derive-rule db0 r)]
+  (update d rel (fn [s] (reduce (fn [a h] (conj a h)) (or s #{}) heads))))) db0 rules)
+   delta0 (new-only seeded db0 rels)]
+  (loop [db seeded
+   delta delta0]
+  (if (delta-empty? delta rels) db (let [nw (snr-round db delta rules rels)]
+  (recur (db-merge db nw rels) nw))))))
 
 (defn run-rules [ctx rules]
   (fixpoint (edb ctx) rules))
