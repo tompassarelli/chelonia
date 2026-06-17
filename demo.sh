@@ -1,28 +1,33 @@
 #!/usr/bin/env bash
-# Lodestar demo — the value loop over the bundled fictional "launch a personal
-# website" threads. Nobody maintains a board; it's all computed from the same
-# Markdown you'd write anyway.
+# Fram engine demo — the substrate loop over the bundled fictional "launch a
+# personal website" threads (no personal data). Shows what the ENGINE does:
+# fold Markdown into a claim graph, inspect it, check structural integrity, and
+# regenerate the Markdown claim-identically. The life verbs you'd actually live
+# in (ready / blocked / leverage / next) belong to a consumer like Lodestar,
+# which derives them from this same graph — they are not part of the engine.
 #
 # Record a cast:  asciinema rec -c ./demo.sh demo.cast  &&  agg demo.cast demo.gif
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# Work on a throwaway copy of the bundled threads so `capture` can write into it
-# without touching the committed examples.
+# Work on a throwaway copy of the bundled threads so the demo never touches the
+# committed examples. FRAM_THREADS / FRAM_LOG point the engine at the copy.
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 cp "$HERE"/threads/*.md "$WORK"/
-export CHELONIA_THREADS="$WORK" CHELONIA_LOG="$WORK/claims.log"
+export FRAM_THREADS="$WORK" FRAM_LOG="$WORK/claims.log"
 
 pause() { [ -t 1 ] && sleep 1 || true; }   # pace for recording; instant non-interactively
-run()   { printf '\n\033[1;36m$ lodestar %s\033[0m\n' "$*"; "$HERE/bin/lodestar" "$@"; pause; }
+run()   { printf '\n\033[1;36m$ fram %s\033[0m\n' "$*"; "$HERE/bin/fram" "$@"; pause; }
 
-printf '\033[2m# Lodestar — a queryable dependency graph for work + life, computed from Markdown\033[0m\n'
-run import                              # fold the Markdown threads into a claim graph
-run ready                               # what is actually actionable now
-run blocked                             # what is waiting, and on what
-run leverage                            # the boring keystone that unblocks the most — a flat list CANNOT show this
-run next                                # ranked: leverage + deadline + momentum
-printf '\n\033[2m# A thought arrives. Capture it in one line — no form, no board.\033[0m\n'
-run capture "Write the launch tweet"    # thought -> a ready thread, folded into the graph
-run ready                               # ...and it is already actionable, with no maintenance step
-printf '\n\033[2m# Nobody updated a board. leverage named the unglamorous keystone; capture turned a thought into structure.\033[0m\n'
+printf '\033[2m# Fram — an append-only claim graph computed from the Markdown you already write\033[0m\n'
+run import                              # fold the Markdown threads into the claim graph
+run show 2026-01-01-090500             # one thread, as the (left predicate right) claims it became
+run validate                            # structural integrity: dependency cycles, dangling refs
+
+printf '\n\033[2m# export is the verified-lossless inverse of import — files are a view, not a source of truth\033[0m\n'
+run export "$WORK/regen"                # regenerate the Markdown from the graph
+a=$("$HERE/bin/fram" import | grep -oE '[0-9]+ claims')
+b=$(FRAM_THREADS="$WORK/regen" "$HERE/bin/fram" import | grep -oE '[0-9]+ claims')
+printf '\033[2m# round-trip: %s in, %s back from the regenerated files — claim-identical (roundtrip_test.clj)\033[0m\n' "$a" "$b"
+
+printf '\n\033[2m# On top of this graph, a consumer (e.g. Lodestar) derives ready / blocked /\n# leverage / next. Those are domain projections, not engine commands.\033[0m\n'

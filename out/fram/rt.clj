@@ -1,5 +1,5 @@
 (ns fram.rt
-  "Host-interop runtime for Chelonia's Beagle modules — the irreducible Clojure
+  "Host-interop runtime for Fram's Beagle modules — the irreducible Clojure
   layer (file IO, log read/write, string ops) the .bclj `declare-extern`s bind
   to. Beagle owns the typed logic; this owns the host calls.
 

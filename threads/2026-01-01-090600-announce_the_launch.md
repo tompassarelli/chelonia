@@ -20,8 +20,8 @@ Post about the site once it's live.
 ## Why this matters
 
 Depends on deploy, which depends on content + CI — so finishing *content* or
-*CI* transitively unblocks two threads each. That's why they top
-`lodestar leverage`.
+*CI* transitively unblocks two threads each. That's why they top a
+`leverage` ranking.
 
 ## Log
 

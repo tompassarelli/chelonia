@@ -2,14 +2,14 @@
 ;; layer (identity as name-claims, predicate vocab + cardinality/value-kind as
 ;; claims, refs linked, dangling persons minted), and prove the reified DOMAIN
 ;; claims (excluding the schema/identity claims) SET-EQUAL the flat fold.
-;;   CHELONIA_LOG=/path bb -cp out cnf_domain_test.clj
+;;   FRAM_LOG=/path bb -cp out cnf_domain_test.clj
 (require '[fram.cnf :as c] '[fram.schema :as s]
          '[fram.fold :as fold] '[fram.rt]
          '[clojure.string :as str] '[clojure.set :as set] '[clojure.java.io :as io])
 
-(def log (System/getenv "CHELONIA_LOG"))
+(def log (System/getenv "FRAM_LOG"))
 (when (or (nil? log) (not (.exists (io/file log))))
-  (println "cnf_domain_test: skipped — set CHELONIA_LOG to a claims.log to run")
+  (println "cnf_domain_test: skipped — set FRAM_LOG to a claims.log to run")
   (System/exit 0))
 (def flat-claims (:claims (fold/fold (fram.rt/read-log log))))
 (def flat-set (set (map (fn [cl] [(:l cl) (:p cl) (:r cl)]) flat-claims)))

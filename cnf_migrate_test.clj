@@ -9,14 +9,14 @@
 ;; round-trip is the identity on the store's live id-triples. This is the data
 ;; half of the cutover; it touches NO live file (writes /tmp only) and is fully
 ;; reversible (the flat log + pre-cnf tag are untouched).
-;;   CHELONIA_LOG=/path bb -cp out cnf_migrate_test.clj
+;;   FRAM_LOG=/path bb -cp out cnf_migrate_test.clj
 (require '[fram.cnf :as c] '[fram.schema :as s]
          '[fram.fold :as fold] '[fram.rt]
          '[clojure.string :as str] '[clojure.set :as set] '[clojure.java.io :as io])
 
-(def log (System/getenv "CHELONIA_LOG"))
+(def log (System/getenv "FRAM_LOG"))
 (when (or (nil? log) (not (.exists (io/file log))))
-  (println "cnf_migrate_test: skipped — set CHELONIA_LOG to a claims.log to run")
+  (println "cnf_migrate_test: skipped — set FRAM_LOG to a claims.log to run")
   (System/exit 0))
 
 ;; cnf_coord.clj is a script (dump-log!/replay live in `user`); load it for them.

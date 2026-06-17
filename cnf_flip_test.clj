@@ -9,15 +9,15 @@
 ;; SET-EQUAL to the reified store — i.e. the flat log stays a faithful mirror, so
 ;; the cold CLI (which folds it) keeps working unchanged across the cutover. Plus
 ;; base_version contention holds end-to-end over the socket.
-;;   CHELONIA_LOG=/path bb -cp out cnf_flip_test.clj
+;;   FRAM_LOG=/path bb -cp out cnf_flip_test.clj
 (require '[fram.cnf :as c] '[fram.schema :as s]
          '[fram.fold :as fold] '[fram.rt] '[fram.kernel :as ck]
          '[clojure.string :as str] '[clojure.set :as set] '[clojure.java.io :as io])
 (load-file "cnf_coord_daemon.clj")   ; daemon: boot!/serve/client/do-* + reified->claims
 
-(def live (System/getenv "CHELONIA_LOG"))
+(def live (System/getenv "FRAM_LOG"))
 (when (or (nil? live) (not (.exists (io/file live))))
-  (println "cnf_flip_test: skipped — set CHELONIA_LOG") (System/exit 0))
+  (println "cnf_flip_test: skipped — set FRAM_LOG") (System/exit 0))
 
 (def flip-flat "/tmp/flip-flat.log")
 (def flip-v2   "/tmp/flip-v2.log")

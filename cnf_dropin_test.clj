@@ -7,15 +7,15 @@
 ;;   - base_version contention holds.
 ;; Cardinality comes from fram.kernel/single? (no hardcoded vocab); touches no
 ;; live file.
-;;   CHELONIA_LOG=/path bb -cp out cnf_dropin_test.clj
+;;   FRAM_LOG=/path bb -cp out cnf_dropin_test.clj
 (require '[fram.cnf :as c] '[fram.schema :as s]
          '[fram.fold :as fold] '[fram.rt]
          '[clojure.set :as set] '[clojure.java.io :as io] '[clojure.string :as str])
 (load-file "cnf_coord_daemon.clj")
 
-(def live (System/getenv "CHELONIA_LOG"))
+(def live (System/getenv "FRAM_LOG"))
 (when (or (nil? live) (not (.exists (io/file live))))
-  (println "cnf_dropin_test: skipped — set CHELONIA_LOG") (System/exit 0))
+  (println "cnf_dropin_test: skipped — set FRAM_LOG") (System/exit 0))
 
 (def flat "/tmp/dropin-flat.log")
 (io/copy (io/file live) (io/file flat))

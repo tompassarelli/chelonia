@@ -2,7 +2,7 @@
 ;; reified CNF kernel, then prove the reified current-view SET-EQUALS the flat
 ;; fold (no claim lost or gained). The flat->reified bridge is domain-level
 ;; (knows the @id ref convention); the kernel stays domain-agnostic.
-;;   CHELONIA_LOG=/path bb -cp out cnf_replay_test.clj
+;;   FRAM_LOG=/path bb -cp out cnf_replay_test.clj
 (require '[fram.cnf :as c]
          '[fram.fold :as fold]
          '[fram.rt]
@@ -10,9 +10,9 @@
          '[clojure.set :as set]
          '[clojure.java.io :as io])
 
-(def log (System/getenv "CHELONIA_LOG"))
+(def log (System/getenv "FRAM_LOG"))
 (when (or (nil? log) (not (.exists (io/file log))))
-  (println "cnf_replay_test: skipped — set CHELONIA_LOG to a claims.log to run")
+  (println "cnf_replay_test: skipped — set FRAM_LOG to a claims.log to run")
   (System/exit 0))
 
 ;; today's flat fold: the current (l p r) string triples.
