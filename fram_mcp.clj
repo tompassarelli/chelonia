@@ -13,6 +13,8 @@
 ;; ============================================================================
 (require '[cheshire.core :as json]
          '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[babashka.process :as proc]
          '[fram.kernel :as k]
          '[fram.fold :as fold]
          '[fram.tools :as tl]
@@ -66,6 +68,118 @@
             (str/starts-with? (str resp) "ok:") {:text (str "committed: " (:l w) " " (:p w) " = " (:r w) " [" (:op w) "]")}
             :else {:isError true :text (str "rejected by coordinator: " resp)}))))))
 
+;; --- graph-AST edits -> the gated authoring transaction (out-of-band) --------
+;; A {:edit ...} is NOT a single coordinator triple — it mints/supersedes a whole
+;; subtree of kind/v/fN claims. The coordinator wire is single-(te,p,r) ONLY, so
+;; this runs the SAME loop the code-as-claims gate proves (authoring-verbs.sh):
+;;   project .bclj -> AST claims (claims-roundtrip --emit-edn)
+;;   apply the verb as a CLAIM OP (chartroom resolve.clj <mode>) -> $RESOLVE_OUT EDN
+;;   regenerate byte-stable text (--render)
+;;   recompile-gate (beagle-build-all '0 error') over the regenerated tree
+;; On PASS: overwrite the source .bclj (claim-canonical text is a downstream view).
+;; On the engine REFUSING the edit (nonzero exit; resolve.clj fail-closes with
+;; "REJECTED ... no claims mutated") OR the regen NOT recompiling: return
+;; {:isError true :text <diagnostic>} and write NOTHING. Fail-closed throughout.
+;;
+;; Tool/binary locations are overridable for tests/CI; defaults match the live tree.
+(defn- env-or [k d] (or (System/getenv k) d))
+(def ^:private beagle-home   (env-or "BEAGLE_HOME"   (str (System/getProperty "user.home") "/code/beagle")))
+(def ^:private roundtrip-rkt (env-or "FRAM_ROUNDTRIP" (str beagle-home "/beagle-lib/private/claims-roundtrip.rkt")))
+(def ^:private build-all     (env-or "FRAM_BUILD_ALL" (str beagle-home "/bin/beagle-build-all")))
+(def ^:private resolve-clj   (env-or "FRAM_RESOLVE"   (str (System/getProperty "user.dir") "/chartroom/src/resolve.clj")))
+(def ^:private fram-out      (env-or "FRAM_OUT"       (str (System/getProperty "user.dir") "/out")))
+;; the source tree claim-canonical modules live in (the .bclj scope is resolved here).
+(def ^:private fram-src      (env-or "FRAM_SRC"       (str (System/getProperty "user.dir") "/src/fram")))
+
+(defn- bclj-files [dir]
+  (->> (.listFiles (io/file dir))
+       (map #(.getPath ^java.io.File %))
+       (filter #(str/ends-with? % ".bclj"))
+       sort vec))
+
+;; the corpus the verb operates over = every .bclj in the source tree (so cross-module
+;; references resolve), with the per-file projected EDN written next to it in a temp dir.
+(defn- sh [opts & args] (apply proc/sh opts args))
+
+(defn route-edit [e]
+  (let [op (:op e) module (:module e)
+        src-files (bclj-files fram-src)
+        targets (filter #(str/includes? % module) src-files)]
+    (cond
+      (empty? src-files) {:isError true :text (str "no .bclj source modules under FRAM_SRC=" fram-src)}
+      (not= 1 (count targets))
+      {:isError true :text (str "module scope \"" module "\" matches " (count targets)
+                                " source files; an edit needs exactly one (no claims mutated)")}
+      :else
+      (let [work (str (System/getProperty "java.io.tmpdir") "/fram-edit-" (System/nanoTime))
+            edir (str work "/e") regen (str work "/regen") odir (str work "/o")
+            _ (run! #(.mkdirs (io/file %)) [edir regen odir])
+            resolve-out work                                  ; $RESOLVE_OUT for resolve.clj
+            ;; 1. project every source module to AST-claims EDN (cross-module resolve).
+            edns (mapv (fn [f]
+                         (let [b (.getName (io/file f))
+                               out (str edir "/" b ".edn")
+                               r (sh {:out (io/file out) :err :string} "racket" roundtrip-rkt "--emit-edn" f)]
+                           [f b out (:exit r) (:err r)]))
+                       src-files)
+            emit-fail (some (fn [[_ b _ ex er]] (when (not (zero? ex)) (str "emit-edn failed for " b ": " er))) edns)]
+        (if emit-fail
+          (do (sh {} "rm" "-rf" work) {:isError true :text emit-fail})
+          (let [edn-paths (mapv #(nth % 2) edns)
+                ;; 2. apply the verb as a CLAIM OP. Spec/body datum strings go to temp files,
+                ;; exactly how the gate passes them (resolve.clj slurps + edn/read-string).
+                spec-file (str work "/spec.edn")
+                resolve-args
+                (case op
+                  "upsert-form" (do (spit spec-file (:form e))
+                                    (concat ["upsert-form" module spec-file] edn-paths))
+                  "set-body"    (do (spit spec-file (:body e))
+                                    (concat ["set-body" (:name e) module spec-file] edn-paths))
+                  "rename"      (concat ["rename" (:name e) (:new-name e) module] edn-paths)
+                  nil)]
+            (if (nil? resolve-args)
+              (do (sh {} "rm" "-rf" work) {:isError true :text (str "unknown edit op: " op)})
+              (let [rr (apply sh {:err :string :extra-env {"RESOLVE_OUT" resolve-out}}
+                              "bb" "-cp" fram-out resolve-clj resolve-args)]
+                (if (not (zero? (:exit rr)))
+                  ;; engine REFUSED — resolve.clj prints "REJECTED — ... no claims mutated" to stderr.
+                  (do (sh {} "rm" "-rf" work)
+                      {:isError true :text (str "REJECTED by the authoring engine — nothing mutated:\n"
+                                                (str/trim (or (:err rr) "")))})
+                  ;; 3. regenerate byte-stable text for every module from the projected EDN.
+                  (let [render-fail
+                        (some (fn [f]
+                                (let [b (.getName (io/file f))
+                                      proj (str resolve-out "/resolved-" b ".edn")
+                                      out (str regen "/" b)]
+                                  (if (.exists (io/file proj))
+                                    (let [r (sh {:out (io/file out) :err :string} "racket" roundtrip-rkt "--render" proj)]
+                                      (when (not (zero? (:exit r))) (str "render failed for " b ": " (:err r))))
+                                    (str "no projected EDN for " b " (expected " proj ")"))))
+                              src-files)]
+                    (if render-fail
+                      (do (sh {} "rm" "-rf" work) {:isError true :text render-fail})
+                      ;; 4. recompile-gate: build the regenerated tree; require '0 error'.
+                      (let [bg (sh {:out :string :err :string} build-all regen "--out" odir)
+                            built (str (:out bg) (:err bg))]
+                        (if (str/includes? built "0 error")
+                          ;; PASS — commit: overwrite the source .bclj(s) with the regenerated text.
+                          (let [tf (first targets)
+                                tb (.getName (io/file tf))]
+                            (io/copy (io/file (str regen "/" tb)) (io/file tf))
+                            (sh {} "rm" "-rf" work)
+                            {:text (str "committed: " op " on " tb
+                                        " (claim op, recompiled, byte-stable text regenerated)")})
+                          ;; FAIL — does not recompile; mutate nothing, return the diagnostic.
+                          (do (sh {} "rm" "-rf" work)
+                              {:isError true :text (str "REJECTED — regenerated module does not recompile (no source written):\n"
+                                                        (str/trim built))}))))))))))))))
+
+;; the graph-AST edit tools — these route through route-edit (a long recompile-gated
+;; transaction), NOT the query budget. Names match the structural ToolSpecs in tools.bclj.
+(def ^:private edit-tools #{"add-def" "set-body" "rename-def"})
+(defn- edit-tool? [nm] (contains? edit-tools nm))
+
 ;; --- dispatch one tools/call -------------------------------------------------
 (defn handle-call [name args]
   (let [{:keys [claims idx cat]} (load-state)
@@ -73,6 +187,7 @@
     (cond
       (:error res) {:isError true :text (str/join "\n" (:error res))}
       (:write res) (route-write (:write res))
+      (:edit res)  (route-edit (:edit res))
       (contains? res :ok) {:text (json/generate-string (:ok res))}
       :else {:text (json/generate-string (:rows res))})))
 
@@ -147,7 +262,14 @@
       (reply id {:tools (mapv ->tool (:cat (load-state)))})
 
       (= method "tools/call")
-      (let [r (with-timeout 10000 (fn [] (handle-call (:name params) (:arguments params))))]
+      ;; graph-AST edits run a multi-process recompile-gated transaction that far
+      ;; exceeds the 10s QUERY budget (and is bounded by its own subprocesses, not a
+      ;; CPU-pegged datalog fixpoint), so they BYPASS with-timeout. Reads/queries keep
+      ;; the budget. Classify by tool name against the catalog's edit ops.
+      (let [nm (:name params)
+            r (if (edit-tool? nm)
+                (handle-call nm (:arguments params))
+                (with-timeout 10000 (fn [] (handle-call nm (:arguments params)))))]
         (reply id {:content [{:type "text" :text (:text r)}] :isError (boolean (:isError r))}))
 
       :else (reply-err id -32601 (str "method not found: " method)))))
