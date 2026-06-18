@@ -129,10 +129,18 @@
 ;; no silent-mistranslation hazard. q/run stays the untouched ORACLE; anything not of
 ;; the simple shape (recursion, negation, derived rels, unbound p/r) falls back to it.
 (defn- idx-build [claims]
-  (let [triples (mapv (fn [c] [(:l c) (:p c) (:r c)]) claims)]
-    {:triples triples
-     :by-pr (reduce (fn [m t] (update m [(nth t 1) (nth t 2)]
-                                      (fn [o] (conj (or o []) t)))) {} triples)}))
+  (reduce (fn [acc c]
+            (let [t [(:l c) (:p c) (:r c)]]
+              (-> acc (update :triples conj t)
+                  (update-in [:by-pr [(:p c) (:r c)]] (fnil conj #{}) t))))
+          {:triples #{} :by-pr {}} claims))
+;; O(1) delta maintenance on the triple set + by-[p r] index (sets => add/remove + dedup).
+(defn- idx-add [idx t]
+  (-> idx (update :triples conj t)
+      (update-in [:by-pr [(nth t 1) (nth t 2)]] (fnil conj #{}) t)))
+(defn- idx-del [idx t]
+  (-> idx (update :triples disj t)
+      (update-in [:by-pr [(nth t 1) (nth t 2)]] (fn [s] (disj (or s #{}) t)))))
 
 (defn- var-term? [t] (and (map? t) (contains? t :var)))
 (defn- unify1 [arg val s]
@@ -179,21 +187,37 @@
             tuples (reduce (fn [acc s] (conj acc (ground-head (:args (:head rule)) s))) #{} substs)]
         {:ok (vec tuples)}))))
 
-;; warm read cache — cold-recompute on version change (the v1 decision). Holds the
-;; kernel read-index, the reified->flat claims vec (scan path / q/run oracle), AND the
-;; by-[p r] index (fast path). All pure functions of the coordinator's seq, rebuilt
-;; only when a commit advances the version.
+;; warm read cache kept CONSISTENT with the coordinator under writes (the live write
+;; path): whole-rebuild on a cold/divergent version, then O(1) incremental delta-apply
+;; on each in-lockstep commit — so a write no longer forces an O(corpus) reprojection
+;; (the swarm write-ceiling). :claims is a SET of Claims (O(1) add/remove); :idx is the
+;; triple-set + by-[p r]; :index (kernel, for :validate) is lazy/whole, off the hot path.
 (defn warm! []
   (let [v (current-seq @co)]
     (when (not= v (:version @cache))
       (let [claims (reified->claims @co)]
-        (reset! cache {:index (ck/build-index claims) :claims claims
-                       :idx (idx-build claims) :version v})))
+        (reset! cache {:claims (set claims) :idx (idx-build claims) :index nil :version v})))
     @cache))
-
-(defn index! [] (:index (warm!)))
-(defn warm-claims [] (:claims (warm!)))
+(defn index! []
+  (let [c (warm!)]
+    (or (:index c) (let [ix (ck/build-index (vec (:claims c)))] (swap! cache assoc :index ix) ix))))
+(defn warm-claims [] (vec (:claims (warm!))))
 (defn warm-idx [] (:idx (warm!)))
+;; apply a just-committed (op te p r) to the warm cache IFF the cache was current as of
+;; the pre-commit seq; else invalidate so the next warm! whole-rebuilds (correctness
+;; floor — incremental only when provably in lockstep). wire (te p r) == reified->claims
+;; projection, so the delta needs no re-projection (proven by the :warm-check gate).
+(defn apply-commit-delta! [pre op te p r]
+  (let [post (current-seq @co)]
+    (when (> post pre)
+      (swap! cache
+        (fn [c]
+          (if (= (:version c) pre)
+            (let [t [te p r] cl (ck/->Claim te p r)]
+              {:claims ((if (= op "assert") conj disj) (:claims c) cl)
+               :idx    ((if (= op "assert") idx-add idx-del) (:idx c) t)
+               :index nil :version post})
+            (assoc c :version -1)))))))
 
 ;; Subscriber delivery is BEST-EFFORT and OFF the write path (finding #3): a slow
 ;; or stuck subscriber (TCP send buffer full) must NOT stall commits, which run
@@ -227,9 +251,12 @@
 (defn- do-assert [te p r base]
   (if (schema-preds p)
     {:reject [(str "reserved predicate '" p "' (engine-internal; use a domain predicate)")] :version (current-seq @co)}
-    (let [res (commit! @co "coord" te p (kind-of r) r base)]
+    (let [pre (current-seq @co)
+          res (commit! @co "coord" te p (kind-of r) r base)]
       (if (:ok res)
-        (do (when-not (:idempotent res) (append-flat! "assert" te p r (:ok res)))
+        (do (when-not (:idempotent res)
+              (append-flat! "assert" te p r (:ok res))
+              (apply-commit-delta! pre "assert" te p r))
             (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
             {:ok (:ok res)})
         {:reject (:reject res) :version (:version res)}))))
@@ -237,9 +264,11 @@
 (defn- do-retract [te p r base]
   (if (schema-preds p)
     {:reject [(str "reserved predicate '" p "'")] :version (current-seq @co)}
-    (let [res (retract! @co "coord" te p r base)]
+    (let [pre (current-seq @co)
+          res (retract! @co "coord" te p r base)]
       (if (:ok res)
         (do (append-flat! "retract" te p r (:ok res))
+            (apply-commit-delta! pre "retract" te p r)
             (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
             {:ok (:ok res)})
         {:reject (:reject res) :version (:version res)}))))
@@ -273,6 +302,13 @@
                       use-idx (and (not (:scan req)) (simple-query? qy))
                       res (if use-idx (idx-run (warm-idx) qy) (q/run (warm-claims) qy))]
                   (assoc res :version (current-seq @co) :engine (if use-idx "index" "scan")))
+      ;; gate: is the incrementally-maintained warm cache == a fresh whole rebuild?
+      :warm-check (let [inc (warm!) fresh (reified->claims @co) fidx (idx-build fresh)]
+                    {:consistent (and (= (:triples (:idx inc)) (:triples fidx))
+                                      (= (:by-pr (:idx inc)) (:by-pr fidx))
+                                      (= (:claims inc) (set fresh)))
+                     :inc-triples (count (:triples (:idx inc))) :fresh-triples (count (:triples fidx))
+                     :version (current-seq @co)})
       :status   {:version (current-seq @co) :claims (count (c/current-claims (:store @co))) :log (or @flat-log (:log @co))}
       {:error "unknown op"})))
 
