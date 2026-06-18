@@ -9,3 +9,6 @@
 /.cpcache/
 
 .DS_Store
+
+# Claude Code harness state (worktrees, hooks, local context)
+.claude/
