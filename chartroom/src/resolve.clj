@@ -23,8 +23,15 @@
             [fram.datalog :as d] [cheshire.core :as json]))   ; datalog+json: the `callgraph` mode
 
 (def mode (first *command-line-args*))
-(def ctx (c/new-store))
-(def tx  (c/begin-tx! ctx "resolve"))
+;; ctx (the store the resolver writes refers_to into) + tx (the write unit) are
+;; ^:dynamic so the resolver can run over an ARBITRARY store — the daemon binds them to
+;; its warm live store; the CLI keeps the root binding (script path unchanged). Dynamic
+;; (not a threaded param) means EVERY interior closure reads the bound store uniformly —
+;; no per-fn parameter to miss, which is exactly how the "interior closure still reads
+;; the global" silent-staleness bug is avoided by construction (still gated by a
+;; not-the-root-store test). binding is thread-local => concurrent resolutions don't cross.
+(def ^:dynamic ctx (c/new-store))
+(def ^:dynamic tx  (c/begin-tx! ctx "resolve"))
 (def SUP (c/value! ctx "supersedes")) (c/set-supersedes-pred! ctx SUP)
 (def file->ents (atom {}))
 
