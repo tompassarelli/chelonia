@@ -12,7 +12,7 @@
 ;;   bb -cp out cnf_coord_daemon.clj serve [port] [v2-log]
 ;;   bb -cp out cnf_coord_daemon.clj test  [port]
 ;; ============================================================================
-(require '[clojure.string :as str] '[clojure.edn :as edn]
+(require '[clojure.string :as str] '[clojure.edn :as edn] '[clojure.set]
          '[fram.cnf :as c] '[fram.schema :as s]
          '[fram.kernel :as ck]
          '[fram.fold :as fold] '[fram.query :as q] '[fram.rt])
@@ -109,16 +109,31 @@
       (.force (.getChannel os) true))
     (reset! flat-mtime (stamp @flat-log))))
 
+;; render one live claim cid into the SAME (l-name p-str r-rendered) shape build-index
+;; wants: subject -> name, predicate -> literal, object -> literal (value) | name (ref).
+;; Returns nil for a schema-pred claim (excluded from the read view).
+(defn- claim->triple [st cid]
+  (let [cl (c/claim-of st cid) pstr (c/literal st (:p cl))]
+    (when-not (schema-preds pstr)
+      [(s/name-of st (:l cl)) pstr
+       (if (c/value-object? st (:r cl)) (c/literal st (:r cl)) (s/name-of st (:r cl)))])))
+
 ;; read-bridge: reified live view -> the flat (l p r) Claim vec build-index wants.
 (defn reified->claims [c0]
   (let [st (:store c0)]
     (->> (c/current-claims st)
-         (keep (fn [cid]
-                 (let [cl (c/claim-of st cid) pstr (c/literal st (:p cl))]
-                   (when-not (schema-preds pstr)
-                     (ck/->Claim (s/name-of st (:l cl)) pstr
-                                 (if (c/value-object? st (:r cl)) (c/literal st (:r cl)) (s/name-of st (:r cl))))))))
+         (keep (fn [cid] (when-let [t (claim->triple st cid)] (ck/->Claim (nth t 0) (nth t 1) (nth t 2)))))
          vec)))
+
+;; The live (l p r) triples on ONE (te-name, p-str) group, projected exactly as
+;; reified->claims would — the authoritative post-commit state of just that group.
+;; Empty when te/p don't resolve or p is a schema-pred. Bounded by the group's
+;; cardinality (1 for a single-valued pred), so reconciling against it is cheap.
+(defn- lp-live-triples [c0 te p]
+  (let [st (:store c0) lid (s/resolve-name st te) pid (c/value-id st p)]
+    (if (and lid pid (not (schema-preds p)))
+      (set (keep #(claim->triple st %) (c/by-lp st lid pid)))
+      #{})))
 
 ;; ---- index-accelerated read path (warm) ------------------------------------
 ;; The scan path (fram.query/run) pulls the WHOLE "triple" relation per literal
@@ -128,19 +143,32 @@
 ;; provably a regrouping of the scan's own tuples: NO int<->string translation, hence
 ;; no silent-mistranslation hazard. q/run stays the untouched ORACLE; anything not of
 ;; the simple shape (recursion, negation, derived rels, unbound p/r) falls back to it.
+;; A by-[l p] index is carried ALONGSIDE by-[p r]: it scopes the delta to the
+;; (l,p) group a write touches, so a single-valued assert that SUPERSEDES the prior
+;; value can drop the victim without scanning the corpus (see apply-commit-delta!).
 (defn- idx-build [claims]
   (reduce (fn [acc c]
             (let [t [(:l c) (:p c) (:r c)]]
               (-> acc (update :triples conj t)
-                  (update-in [:by-pr [(:p c) (:r c)]] (fnil conj #{}) t))))
-          {:triples #{} :by-pr {}} claims))
-;; O(1) delta maintenance on the triple set + by-[p r] index (sets => add/remove + dedup).
+                  (update-in [:by-pr [(:p c) (:r c)]] (fnil conj #{}) t)
+                  (update-in [:by-lp [(:l c) (:p c)]] (fnil conj #{}) t))))
+          {:triples #{} :by-pr {} :by-lp {}} claims))
+;; Drop a key whose bucket emptied (DON'T leave it mapped to #{}) — idx-build never
+;; emits an empty-set entry, it just omits the key, so the incremental index must do
+;; the same or its REPRESENTATION drifts from a fresh fold (warm-check :by-pr-eq
+;; false: equal triple-set, dangling empty bucket — queries stay correct since
+;; lit-candidates treats #{} and an absent key identically, but the tripwire fires).
+(defn- bucket-update [m k v]
+  (let [nb (disj (get m k #{}) v)] (if (empty? nb) (dissoc m k) (assoc m k nb))))
+;; O(1) delta maintenance on the triple set + both indexes (sets => add/remove + dedup).
 (defn- idx-add [idx t]
   (-> idx (update :triples conj t)
-      (update-in [:by-pr [(nth t 1) (nth t 2)]] (fnil conj #{}) t)))
+      (update-in [:by-pr [(nth t 1) (nth t 2)]] (fnil conj #{}) t)
+      (update-in [:by-lp [(nth t 0) (nth t 1)]] (fnil conj #{}) t)))
 (defn- idx-del [idx t]
   (-> idx (update :triples disj t)
-      (update-in [:by-pr [(nth t 1) (nth t 2)]] (fn [s] (disj (or s #{}) t)))))
+      (update :by-pr (fn [m] (bucket-update m [(nth t 1) (nth t 2)] t)))
+      (update :by-lp (fn [m] (bucket-update m [(nth t 0) (nth t 1)] t)))))
 
 (defn- var-term? [t] (and (map? t) (contains? t :var)))
 (defn- unify1 [arg val s]
@@ -203,20 +231,34 @@
     (or (:index c) (let [ix (ck/build-index (vec (:claims c)))] (swap! cache assoc :index ix) ix))))
 (defn warm-claims [] (vec (:claims (warm!))))
 (defn warm-idx [] (:idx (warm!)))
-;; apply a just-committed (op te p r) to the warm cache IFF the cache was current as of
+;; apply a just-committed (te p) edit to the warm cache IFF the cache was current as of
 ;; the pre-commit seq; else invalidate so the next warm! whole-rebuilds (correctness
-;; floor — incremental only when provably in lockstep). wire (te p r) == reified->claims
-;; projection, so the delta needs no re-projection (proven by the :warm-check gate).
-(defn apply-commit-delta! [pre op te p r]
+;; floor — incremental only when provably in lockstep). We reconcile the whole (te,p)
+;; GROUP against the store's authoritative post-commit live set rather than applying
+;; the wire tuple alone: a single-valued ASSERT also SUPERSEDES the prior value, so
+;; applying only the new tuple left the superseded victim live in the cache (warm !=
+;; cold — a genuine cache bug the gate's supersede step caught). Group-reconcile drops
+;; the victim AND adds the new tuple in one correct step, op-agnostically (assert /
+;; retract / supersede / ref all flow through it). Cost is O(group cardinality) — the
+;; cache's by-[l p] gives the old group, the store gives the new — not O(corpus).
+(defn apply-commit-delta! [pre te p]
   (let [post (current-seq @co)]
     (when (> post pre)
       (swap! cache
         (fn [c]
           (if (= (:version c) pre)
-            (let [t [te p r] cl (ck/->Claim te p r)]
-              {:claims ((if (= op "assert") conj disj) (:claims c) cl)
-               :idx    ((if (= op "assert") idx-add idx-del) (:idx c) t)
-               :index nil :version post})
+            (let [old (get-in c [:idx :by-lp] {})
+                  old-g (get old [te p] #{})                ; cache's tuples on (te,p)
+                  new-g (lp-live-triples @co te p)          ; store's live tuples on (te,p)
+                  to-del (clojure.set/difference old-g new-g)
+                  to-add (clojure.set/difference new-g old-g)
+                  idx' (as-> (:idx c) ix
+                         (reduce idx-del ix to-del)
+                         (reduce idx-add ix to-add))
+                  claims' (as-> (:claims c) cs
+                            (reduce (fn [s t] (disj s (ck/->Claim (nth t 0) (nth t 1) (nth t 2)))) cs to-del)
+                            (reduce (fn [s t] (conj s (ck/->Claim (nth t 0) (nth t 1) (nth t 2)))) cs to-add))]
+              {:claims claims' :idx idx' :index nil :version post})
             (assoc c :version -1)))))))
 
 ;; Subscriber delivery is BEST-EFFORT and OFF the write path (finding #3): a slow
@@ -256,7 +298,7 @@
       (if (:ok res)
         (do (when-not (:idempotent res)
               (append-flat! "assert" te p r (:ok res))
-              (apply-commit-delta! pre "assert" te p r))
+              (apply-commit-delta! pre te p))
             (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
             {:ok (:ok res)})
         {:reject (:reject res) :version (:version res)}))))
@@ -268,7 +310,7 @@
           res (retract! @co "coord" te p r base)]
       (if (:ok res)
         (do (append-flat! "retract" te p r (:ok res))
-            (apply-commit-delta! pre "retract" te p r)
+            (apply-commit-delta! pre te p)
             (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
             {:ok (:ok res)})
         {:reject (:reject res) :version (:version res)}))))
@@ -306,6 +348,7 @@
       :warm-check (let [inc (warm!) fresh (reified->claims @co) fidx (idx-build fresh)]
                     {:consistent (and (= (:triples (:idx inc)) (:triples fidx))
                                       (= (:by-pr (:idx inc)) (:by-pr fidx))
+                                      (= (:by-lp (:idx inc)) (:by-lp fidx))
                                       (= (:claims inc) (set fresh)))
                      :inc-triples (count (:triples (:idx inc))) :fresh-triples (count (:triples fidx))
                      :version (current-seq @co)})
