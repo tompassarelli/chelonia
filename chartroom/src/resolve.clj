@@ -642,7 +642,9 @@
           (let [forms (remove *deleted-forms* (rest (ordered-children wrap)))]
             (doseq [[i f] (map-indexed vector forms)]
               (println (str "[" wrap " \"f" (inc i) "\" " f "]")))))))))
-(defn out-path [src] (str "/tmp/resolved-" (-> src (str/split #"/") last) ".edn"))
+;; render output dir honors $RESOLVE_OUT (default /tmp) so concurrent gate runs / agents
+;; don't collide on a global /tmp/resolved-*.edn — the gates set it to a per-run temp dir.
+(defn out-path [src] (str (or (System/getenv "RESOLVE_OUT") "/tmp") "/resolved-" (-> src (str/split #"/") last) ".edn"))
 
 ;; --- no-capture invariant ---------------------------------------------------
 ;; Renaming def B to `new` is UNSOUND if a reference to B would, after rendering
