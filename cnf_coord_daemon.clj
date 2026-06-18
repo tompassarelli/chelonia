@@ -21,6 +21,13 @@
         '[javax.net.ssl SSLContext KeyManagerFactory TrustManagerFactory]
         '[java.security KeyStore])
 (load-file "cnf_coord.clj")          ; the reified coordinator library
+;; resolve.clj — the store-parameterized lexical resolver (S3.1/S3.2), loaded as a
+;; LIBRARY: its -main is guarded behind a recognized MODES arg, and the daemon's
+;; *command-line-args* ("serve-flat" ...) is not one, so load-file runs NOTHING — it
+;; only defines `resolve/resolve-warm-store!` + the read accessors. Loaded here, at
+;; daemon-namespace-load time, so the `resolve/...`-qualified symbols in callers-of /
+;; with-resolve-read resolve at compile time (load-file is run-once by nature).
+(load-file (str (System/getProperty "user.dir") "/chartroom/src/resolve.clj"))
 
 ;; ---- state: one reified coordinator + a cached read index ------------------
 (def co (atom nil))                  ; {:store :log :lock} — reified canonical (v2 log)
@@ -31,6 +38,17 @@
 (def flat-mtime (atom nil))          ; last-seen flat-log stamp (to detect external edits)
 (def flat-canonical? (atom false))   ; drop-in mode: flat log is canonical, reload absorbs edits
 (def schema-preds #{"name" "cardinality" "value_kind" "cnf-supersedes"})
+
+;; ---- warm scope-correct code-intelligence (refers_to materialized over `co`) -
+;; resolve.clj's lexical resolver (loadable as a library) writes refers_to + render-
+;; marker claims into a store. We run it OVER the warm `co` store, version-cached.
+;; These predicates are DERIVED / in-memory: they must (a) never reach the flat log,
+;; (b) never leak into the S1 :query warm cache (which keys on current-seq), and
+;; (c) never bump current-seq. claim->triple filters them out of every read projection
+;; (so :query/:warm-check/the read view never see them); the materialize step rolls
+;; back the seq-space the resolver's tx consumed.
+(def resolve-preds #{"refers_to" "keep_spelling" "qualifier" "ctor_prefix" "accessor_field" "supersedes"})
+(def refers-version (atom -1))       ; the co version refers_to was last materialized at
 
 ;; ---- DoS hardening knobs (findings #2/#5/#19/#20) --------------------------
 ;; Read timeout on every accepted socket — mirrors the CLIENT side (fram.rt
@@ -111,10 +129,15 @@
 
 ;; render one live claim cid into the SAME (l-name p-str r-rendered) shape build-index
 ;; wants: subject -> name, predicate -> literal, object -> literal (value) | name (ref).
-;; Returns nil for a schema-pred claim (excluded from the read view).
+;; Returns nil for a schema-pred OR resolve-pred claim (both excluded from the read view).
+;; The single filter point: reified->claims, lp-live-triples, AND the warm cache all
+;; funnel through here, so filtering BOTH sets here is what keeps the DERIVED refers_to
+;; + render markers (materialized over `co` for :callers) invisible to :query, the
+;; :warm-check tripwire, and the read view — the corpus :query sees is exactly the AST
+;; claims the flat log ingested, identical whether or not refers_to has been materialized.
 (defn- claim->triple [st cid]
   (let [cl (c/claim-of st cid) pstr (c/literal st (:p cl))]
-    (when-not (schema-preds pstr)
+    (when-not (or (schema-preds pstr) (resolve-preds pstr))
       [(s/name-of st (:l cl)) pstr
        (if (c/value-object? st (:r cl)) (c/literal st (:r cl)) (s/name-of st (:r cl)))])))
 
@@ -325,6 +348,128 @@
        (mapcat (fn [te] (map #(str (subs te 1) ": " %) (ck/violations-i idx te))))
        vec))
 
+;; ============================================================================
+;; :callers — warm scope-correct callers of a binding, from refers_to over `co`.
+;; ============================================================================
+;; clean slate: surgically drop EVERY live resolve-pred claim (refers_to + render
+;; markers) from the cnf STORE's claims + all five indexes (idx-by-l/p/r/lp/pr) + the
+;; superseded set. (Independent of the S1-fix cache's :by-lp index — this is the store,
+;; not the warm cache.) The resolver assumes a clean slate, else a re-resolve over an
+;; existing edge set doubles the refers_to edges. These claims are derived/in-memory
+;; only, so dropping them from the map (rather than appending a supersede) is exactly
+;; right — nothing durable references them, and they were never written to the flat log.
+(defn- strip-resolve-claims! [st]
+  (let [m @st
+        rp-ids (set (keep (fn [[vid v]] (when (resolve-preds v) vid)) (:values m)))
+        victims (set (keep (fn [[cid cl]] (when (rp-ids (:p cl)) cid)) (:claims m)))]
+    (when (seq victims)
+      (let [drop-from (fn [idx] (reduce-kv (fn [acc k cids]
+                                             (let [kept (vec (remove victims cids))]
+                                               (if (seq kept) (assoc acc k kept) acc)))
+                                           {} idx))]
+        (swap! st (fn [s]
+                    (-> s
+                        (update :claims #(reduce dissoc % victims))
+                        (update :tx-of #(reduce dissoc % victims))
+                        (update :objects #(reduce dissoc % victims))
+                        (update :superseded #(reduce dissoc % victims))
+                        (update :idx-by-l drop-from)
+                        (update :idx-by-p drop-from)
+                        (update :idx-by-r drop-from)
+                        (update :idx-by-lp drop-from)
+                        (update :idx-by-pr drop-from))))))
+    (count victims)))
+
+;; Materialize refers_to over the warm store, cached by version. Whole-corpus
+;; per version (the correct FIRST CUT — scoped re-resolve is a later step). Under
+;; dlock (called from handle): clear stale refers_to, run the resolver, set version.
+;; The resolver opens a tx (begin-tx! bumps :next-seq + records a :txs entry) — that
+;; would bump current-seq and so make refers-version chase a moving target AND poison
+;; the S1 :query cache key. So we SNAPSHOT the seq-space + supersedes-pred before, and
+;; restore them after: the freshly-minted refers_to claims/values/ids are KEPT (next-id
+;; stays advanced so a later real commit mints past them), but :txs / :next-seq are rolled
+;; back (current-seq unchanged) and :supersedes-pred is restored to the migrate store's
+;; cnf-supersedes (the resolver re-points it at "supersedes"; daemon writes need cnf-supersedes).
+(defn materialize-refers! []
+  (let [st (:store @co)
+        before @st]
+    (strip-resolve-claims! st)
+    (resolve/resolve-warm-store! st)         ; side-effect: writes refers_to into st
+    (swap! st assoc
+           :next-seq        (:next-seq before)
+           :supersedes-pred (:supersedes-pred before)
+           :txs             (:txs before))
+    (reset! refers-version (current-seq @co))))
+
+(defn ensure-refers! []
+  (when (not= @refers-version (current-seq @co))
+    (materialize-refers!)))
+
+;; READ-ONLY binding of resolve.clj's accessors over a store: bind ctx + the marker
+;; value-ids (recomputed against THIS store — store-local ids must match their store)
+;; and the corpus tables, WITHOUT running run-resolution! (which would write more
+;; refers_to and double the edges). refers_to is already materialized over `co`; this
+;; just lets ultimate/binding-name/pred-val/name->module read it. corpus-from-store!
+;; (re)derives the def-binding tables from the store so def-binding works for the
+;; (module name) target lookup — it writes NO claims, only sets dynamic tables.
+(defmacro with-resolve-read [store & body]
+  `(let [st# ~store]
+     (binding [resolve/ctx st#
+               resolve/Vp     (c/value-id st# "v")
+               resolve/KIND   (c/value-id st# "kind")
+               resolve/REFERS (c/value-id st# "refers_to")
+               resolve/FIXED  (c/value-id st# "keep_spelling")
+               resolve/QUAL   (c/value-id st# "qualifier")
+               resolve/CTOR   (c/value-id st# "ctor_prefix")
+               resolve/ACC    (c/value-id st# "accessor_field")
+               resolve/file->ents (atom {})
+               resolve/srcs [] resolve/file-modframe {} resolve/file-typeframe {}
+               resolve/file-accessors {} resolve/global-exports {}
+               resolve/global-type-exports {} resolve/global-accessor-exports {}]
+       (resolve/corpus-from-store!)            ; derive def-binding tables (writes no claims)
+       ~@body)))
+
+;; resolve a target binding spec to its node entity-id in `co`. Accepts a direct node
+;; name "@mod#id", OR a (module name) pair resolved via the def-binding tables (value
+;; OR type defs) the resolver builds from the warm corpus — the SAME resolution the
+;; EDN path uses, so the daemon and EDN agree on which node a binding name denotes.
+(defn- target-node [req]
+  (let [st (:store @co)]
+    (cond
+      (:te req)                              ; "@mod#id" -> entity-id
+      (s/resolve-name st (:te req))
+      (and (:module req) (:name req))
+      (with-resolve-read st (resolve/def-binding (:module req) (:name req)))
+      :else nil)))
+
+;; callers-of(B): the set of [module, rendered-name] for every referencing leaf whose
+;; refers_to (followed transitively through re-export chains via `ultimate`) lands on
+;; B. Pure over the warm store — refers_to is already materialized; with-resolve-read
+;; only binds the read accessors. The rendered-name is computed with resolve.clj's OWN
+;; render logic (binding-name + the ctor/qualifier/accessor/keep_spelling markers) so
+;; it is byte-identical to what extract-file! emits for that leaf — hence identical to
+;; the EDN-path callers-of (which runs this exact code over its EDN-resolved store).
+(defn callers-of-in-store [st B]
+  (when B
+    (with-resolve-read st
+      (->> (c/by-p resolve/ctx resolve/REFERS)          ; every live refers_to claim
+           (map #(c/claim-of resolve/ctx %))
+           (keep (fn [cl]
+                   (let [L (:l cl)]
+                     (when (= B (resolve/ultimate (:r cl)))   ; ultimate target is B (chains)
+                       (let [nm     (resolve/binding-name (resolve/refers-target L))
+                             cpfx   (resolve/pred-val L "ctor_prefix")
+                             afield (resolve/pred-val L "accessor_field")
+                             qual   (resolve/pred-val L "qualifier")
+                             fixed? (seq (c/by-lp resolve/ctx L resolve/FIXED))
+                             rendered (cond fixed? (resolve/sym-val L)   ; :rename keeps own spelling
+                                            cpfx   (str cpfx nm)
+                                            afield (str (str/lower-case nm) "-" afield)
+                                            qual   (str qual "/" nm)
+                                            :else  nm)]
+                         [(resolve/name->module (s/name-of resolve/ctx L)) rendered])))))
+           set))))
+
 (declare maybe-reload!)
 
 (defn handle [req]
@@ -353,6 +498,19 @@
                      :inc-triples (count (:triples (:idx inc))) :fresh-triples (count (:triples fidx))
                      :version (current-seq @co)})
       :status   {:version (current-seq @co) :claims (count (c/current-claims (:store @co))) :log (or @flat-log (:log @co))}
+      ;; warm scope-correct callers of a binding, served from refers_to materialized
+      ;; over `co` (version-cached). ensure-refers! whole-corpus re-resolves only when
+      ;; the code version moved (the correct first cut); the reverse lookup is then a
+      ;; by-pr/ultimate scan returning the set of [module, rendered-name] referencing
+      ;; leaves. Target is {:te "@mod#id"} OR {:module .. :name ..}.
+      :callers  (do (ensure-refers!)
+                    (let [B (target-node req)]
+                      (if B
+                        {:callers (vec (callers-of-in-store (:store @co) B))
+                         :target  (s/name-of (:store @co) B)
+                         :version (current-seq @co)}
+                        {:error "no such binding" :te (:te req) :module (:module req) :name (:name req)
+                         :version (current-seq @co)})))
       {:error "unknown op"})))
 
 ;; ---- socket server (verbatim shape from the proven coord.clj) ---------------
