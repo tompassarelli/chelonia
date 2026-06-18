@@ -454,7 +454,8 @@
                                           (keep sym-val (param-binds fb)))))))))
                    (forms-of src))))
 
-(def srcs (mapv load-edn (drop (case mode "resolve" 1 "rename" 4 "delete" 3 "callgraph" 1) *command-line-args*)))
+(def srcs (mapv load-edn (drop (case mode "resolve" 1 "rename" 4 "delete" 3 "callgraph" 1
+                                          "upsert-form" 3 "set-body" 4) *command-line-args*)))
 (def file-modframe (into {} (map (fn [s] [s (module-defs s)]) srcs)))
 (def file-typeframe (into {} (map (fn [s] [s (module-types s)]) srcs)))
 (def file-accessors (into {} (map (fn [s] [s (module-accessors s)]) srcs)))
@@ -525,6 +526,63 @@
 ;; itself a reference) to the ULTIMATE binding, and render its current name.
 (defn ultimate [B] (loop [b B n 0] (let [t (refers-target b)] (if (and t (< n 64)) (recur t (inc n)) b))))
 (defn binding-name [B] (sym-val (ultimate B)))
+
+;; ============================================================================
+;; AUTHORING — mint a NEW datum subtree into the SAME claim store (the inverse of
+;; claims-roundtrip.rkt's datum->claims). This is what makes add-def / set-body a
+;; CLAIM OPERATION, not a text splice: a Clojure EDN datum (the structured edit
+;; spec the agent emits, e.g. `(defn add-two [x :- Int] :- Int (+ x 2))`) is walked
+;; into fresh entities carrying `kind`/`v`/`fN` claims — exactly the reader-datum
+;; shape --emit-edn projects — and registered in file->ents so extract-file! emits
+;; them. The wrapper/body fN edges are then wired (append) or SUPERSEDED (replace),
+;; reusing the rename template (assert new, supersede old; reads filter superseded).
+;; The renderer reconstructs purely from fN/tail, so a minted subtree round-trips
+;; byte-stable, and any reference in it resolves via the SAME lexical walk (a fresh
+;; pass over forms-of after minting), giving scope-correctness for free.
+;; ============================================================================
+(defn register! [src e] (swap! file->ents update src (fnil conj []) e) e)
+;; leaf-kind: the reader `kind` for a Clojure scalar (mirrors datum->claims:55-64).
+;; Beagle reads [..] as (#%brackets ..) and {..} as (#%map ..), so a vector/map datum
+;; in the spec is minted as a `list` headed by that desugaring symbol — identical to
+;; what --emit-edn produces, keeping the projection lossless.
+(defn mint-leaf! [src kind v]
+  (let [e (register! src (c/entity! ctx))]
+    (c/claim! ctx e KIND (c/value! ctx kind) tx)
+    (c/claim! ctx e Vp (c/value! ctx v) tx)
+    e))
+(defn mint-datum! [src d]
+  (cond
+    (nil? d)        (let [e (register! src (c/entity! ctx))] (c/claim! ctx e KIND (c/value! ctx "nil") tx) e)
+    (symbol? d)     (mint-leaf! src "symbol"  (str d))
+    (keyword? d)    (mint-leaf! src "keyword" (subs (str d) 1))
+    (string? d)     (mint-leaf! src "string"  d)
+    (boolean? d)    (mint-leaf! src "bool"    (if d "true" "false"))
+    (char? d)       (mint-leaf! src "char"    (str d))
+    (number? d)     (mint-leaf! src "number"  (str d))
+    (or (list? d) (seq? d) (vector? d) (map? d))
+    ;; symbols built via (symbol ..) — writing #%brackets literally would be read as a
+    ;; reader tag by Clojure's reader at load time of this file.
+    (let [head  (cond (vector? d) [(symbol "#%brackets")] (map? d) [(symbol "#%map")] :else [])
+          elems (concat head (if (map? d) (apply concat (seq d)) (seq d)))
+          e     (register! src (c/entity! ctx))]
+      (c/claim! ctx e KIND (c/value! ctx "list") tx)
+      (doseq [[i x] (map-indexed vector elems)]
+        (c/claim! ctx e (c/value! ctx (str "f" i)) (mint-datum! src x) tx))
+      e)
+    :else (mint-leaf! src "other" (pr-str d))))
+;; the body fN edges of a defn form = the consecutive fN child claims whose slot is
+;; AFTER the params bracket (everything --emit-edn put at f5,f6,... in `defn` :122).
+(defn fN-claims [parent]            ; -> [[N claim-id child-node] ...] over LIVE fN edges, ordered
+  (->> (c/by-l ctx parent) (map (fn [cid] [cid (c/claim-of ctx cid)]))
+       (keep (fn [[cid cl]] (let [p (c/literal ctx (:p cl))]
+                              (when (and (string? p) (re-matches #"f\d+" p))
+                                [(parse-long (subs p 1)) cid (:r cl)]))))
+       (sort-by first)))
+;; supersede a claim WITHOUT a replacement value (e.g. retiring a wrapper/body fN edge).
+;; The supersedes edge needs a subject; a fresh entity is fine — the live-view filter
+;; keys off the superseded :r (the old claim id), not the subject (cnf.bclj:105-106,116).
+(defn retire-claim! [oldc] (c/claim! ctx (c/entity! ctx) SUP oldc tx))
+
 ;; --- delete projection: omit a top-level form + its subtree, renumber siblings ---
 ;; The renderer reads fN children CONSECUTIVELY and includes only nodes reachable from
 ;; the root, so deleting a form means (a) skip its whole subtree (else its orphaned root
@@ -684,6 +742,27 @@
         :else (mapcat #(capture-refs % scope B new) kids)))
     []))
 
+;; --- authoring support (used by the upsert-form / set-body case arms) -------
+;; re-resolve!: after a mint, the module frame is stale (a new def, or a new body's
+;; references). Recompute every module's frame + re-walk forms so fresh references
+;; carry refers_to. Idempotent — bind! only adds an edge where one resolves.
+(defn re-resolve! []
+  (let [modframe  (into {} (map (fn [s] [s (module-defs s)]) srcs))
+        typeframe (into {} (map (fn [s] [s (module-types s)]) srcs))
+        accessors (into {} (map (fn [s] [s (module-accessors s)]) srcs))]
+    (doseq [src srcs]
+      (binding [*xresolve* (make-xresolve src)
+                *tresolve* (fn [nm] (get (get typeframe src) nm))
+                *aresolve* (fn [nm] (get (get accessors src) nm))]
+        (walk-all (forms-of src) (list (get modframe src)))
+        (walk-comments src)))))
+(defn author-emit! [op detail]
+  (doseq [src srcs] (extract-file! src (out-path src)))
+  (binding [*out* *err*]
+    (println (str "================ authoring: " op " ================"))
+    (println detail)
+    (doseq [src srcs] (println (str "projected -> " (out-path src) "   <- " src)))))
+
 ;; ============================================================================
 (case mode
   "resolve"
@@ -803,6 +882,99 @@
       (println "================ Turtle #5 — delete (no-orphaned-refs satisfied) ================")
       (println (str "deleted def `" name "` in \"" target "\": " (count all-forms) " form(s); 0 orphaned refs"))
       (doseq [src srcs] (println (str "projected -> " (out-path src) "   <- " src)))))
+
+  ;; ============================================================================
+  ;; AUTHORING VERBS — the GAP closed: a claim operation for novel authoring.
+  ;; upsert-form : add a NEW top-level def (append a wrapper fN edge) OR replace an
+  ;;               existing top-level def by name (supersede its wrapper fN edge to
+  ;;               point at a freshly-minted subtree). The form is given as an EDN
+  ;;               datum (the structured edit spec), minted into the SAME store.
+  ;; Both reuse extract-file! (the rename/delete render machine) and re-run the
+  ;; lexical walk over the post-mint corpus, so a reference in the new code resolves
+  ;; via refers_to (scope-correct) exactly like hand-written code — then the recompile
+  ;; gate (authoring.sh) is the only acceptance criterion. fail-closed before that.
+  ;; ============================================================================
+  "upsert-form"
+  (let [[scope spec-file] (drop 1 *command-line-args*)
+        target-srcs (filter #(str/includes? % scope) srcs)
+        datum (edn/read-string (slurp spec-file))]
+    ;; INVARIANT (single target): scope must name exactly one source file to author into.
+    (when (not= 1 (count target-srcs))
+      (binding [*out* *err*]
+        (println (str "REJECTED — scope \"" scope "\" matches " (count target-srcs)
+                      " source files; upsert-form needs exactly one (no claims mutated).")))
+      (System/exit 3))
+    ;; INVARIANT (well-formed def): the spec must be a top-level form whose second
+    ;; element is the def NAME symbol — else there is nothing to upsert by name.
+    (when (and (seq? datum) (not (VALUE-DEFS (str (first datum)))))
+      (binding [*out* *err*]
+        (println (str "REJECTED — upsert-form spec head `" (first datum)
+                      "` is not a value def (def/defn/...); no claims mutated.")))
+      (System/exit 3))
+    (let [src (first target-srcs)
+          wrap (wrapper-of src)
+          forms (vec (fN-claims wrap))               ; [[N claim child] ...] incl. f0=beagle-file sym
+          new-name (when (and (seq? datum) (VALUE-DEFS (str (first datum)))) (str (second datum)))
+          existing (when new-name (def-binding src new-name))
+          ;; the existing top-level form (if replacing) — locate its wrapper fN slot
+          victim-form (when existing (form-for-victim src existing))
+          victim-entry (when victim-form (some (fn [[n cid r]] (when (= r victim-form) [n cid r])) forms))
+          new-root (mint-datum! src datum)]
+      (if victim-entry
+        ;; REPLACE: supersede the old wrapper fN edge; re-point the SAME slot index.
+        (let [[n cid _] victim-entry]
+          (retire-claim! cid)
+          (c/claim! ctx wrap (c/value! ctx (str "f" n)) new-root tx))
+        ;; ADD: append at the next consecutive wrapper fN slot (max f-index + 1).
+        (let [next-n (inc (apply max (map first forms)))]
+          (c/claim! ctx wrap (c/value! ctx (str "f" next-n)) new-root tx)))
+      (re-resolve!)
+      (author-emit! "upsert-form"
+                    (str (if victim-entry "replaced" "added") " top-level def `" new-name
+                         "` in \"" scope "\" (1 form minted as claims; refs resolved via refers_to)"))))
+
+  ;; set-body : replace a defn's BODY — supersede every post-params fN edge of the
+  ;; named defn and re-wire to a freshly-minted body datum.
+  "set-body"
+  (let [[name scope body-file] (drop 1 *command-line-args*)
+        target-srcs (filter #(str/includes? % scope) srcs)
+        datum (edn/read-string (slurp body-file))]
+    (when (not= 1 (count target-srcs))
+      (binding [*out* *err*]
+        (println (str "REJECTED — scope \"" scope "\" matches " (count target-srcs)
+                      " source files; set-body needs exactly one (no claims mutated).")))
+      (System/exit 3))
+    (let [src (first target-srcs)
+          B (def-binding src name)
+          form (when B (form-for-victim src B))
+          d (when form (unwrap-def form))]
+      ;; INVARIANT (target exists + is a defn): set-body needs a defn form whose body
+      ;; is the post-params fN edges. A bare (def x val) value has no params bracket.
+      (when (or (nil? form) (not (PARAM-FORMS (head-sym d))))
+        (binding [*out* *err*]
+          (println (str "REJECTED — `" name "` is not a defn with a body in \"" scope
+                        "\" (set-body needs a defn; no claims mutated).")))
+        (System/exit 5))
+      (let [kids (fN-claims d)                       ; [[N claim child] ...]
+            bracket-n (some (fn [[n _ r]] (when (brackets? r) n)) kids)
+            ;; the optional `:- Ret` annotation sits AFTER the params bracket; the body
+            ;; is every fN slot after that. Keep f0..(bracket + ret) — replace the rest.
+            ret? (some (fn [[n _ r]] (and (= n (inc bracket-n)) (TYPE-COLON (sym-val r)))) kids)
+            body-start (+ bracket-n (if ret? 3 1))   ; skip params, and `:- Ret` (2 slots) if present
+            body-slots (filter (fn [[n _ _]] (>= n body-start)) kids)
+            new-root (mint-datum! src datum)]
+        (when (empty? body-slots)
+          (binding [*out* *err*]
+            (println (str "REJECTED — `" name "` has no body fN edges to replace; no claims mutated.")))
+          (System/exit 5))
+        ;; supersede every old body fN edge, then wire the new single body form at the
+        ;; first body slot (a defn body is an implicit do; one form is well-formed).
+        (doseq [[_ cid _] body-slots] (retire-claim! cid))
+        (c/claim! ctx d (c/value! ctx (str "f" body-start)) new-root tx)
+        (re-resolve!)
+        (author-emit! "set-body"
+                      (str "replaced body of defn `" name "` in \"" scope "\" ("
+                           (count body-slots) " body slot(s) superseded; new body minted as claims)")))))
 
   ;; ============================================================================
   ;; callgraph — the scope-correct call graph + transitive blast radius, derived
