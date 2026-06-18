@@ -50,6 +50,40 @@
 (def resolve-preds #{"refers_to" "keep_spelling" "qualifier" "ctor_prefix" "accessor_field" "supersedes"})
 (def refers-version (atom -1))       ; the co version refers_to was last materialized at
 
+;; ---- S3.3: scoped re-resolve state -----------------------------------------
+;; Whole-corpus re-resolve on every code edit is O(corpus) per commit — the swarm
+;; write-ceiling. S3.3 makes re-resolve MODULE-GRANULAR: track which modules an
+;; edit touched (dirty), classify by EXPORT-SET delta (not syntactic site), and
+;; re-resolve ONLY the affected module set (dirty ∪ export-changed consumers).
+;; dirty-modules  : modules with an asserted/retracted AST claim since last materialize.
+;; export-snapshot: {module -> #{exported/top-level name}} captured at the last
+;;                  materialize — the classifier diffs the live set against it.
+;; materialized?  : has refers_to been fully materialized at least once (cold gate —
+;;                  the FIRST materialize is necessarily whole-corpus). maybe-reload!
+;;                  (external flat rebuild) resets it, forcing a fresh whole pass.
+;; last-materialize: instrumentation for the gate — {:mode :scoped|:whole :walked #{mods}
+;;                  :stripped <n> :forms-walked <n>}. Read via the :refers-debug op.
+(def dirty-modules (atom #{}))
+(def export-snapshot (atom {}))
+(def materialized? (atom false))
+(def last-materialize (atom nil))
+;; module of an AST node name "@kernel#127" -> "kernel" (same parse resolve.clj uses).
+(defn- module-of-name [nm]
+  (when (string? nm)
+    (when-let [[_ m] (re-matches #"@([^#]+)#\d+" nm)] m)))
+;; record that a commit touched te's module (te is "@mod#int"); skip non-AST te.
+(defn- mark-dirty! [te]
+  (when-let [m (module-of-name te)] (swap! dirty-modules conj m)))
+;; reset all S3.3 derived state — called when `co` is REBUILT wholesale (boot /
+;; external flat reload): the in-memory refers_to + export snapshot belong to the OLD
+;; store, so the next materialize must be a fresh cold whole-corpus pass.
+(defn- reset-refers-state! []
+  (reset! dirty-modules #{})
+  (reset! export-snapshot {})
+  (reset! materialized? false)
+  (reset! refers-version -1)
+  (reset! last-materialize nil))
+
 ;; ---- DoS hardening knobs (findings #2/#5/#19/#20) --------------------------
 ;; Read timeout on every accepted socket — mirrors the CLIENT side (fram.rt
 ;; coord-socket, 2000ms), but a touch longer so a legitimately-slow gateway
@@ -321,7 +355,8 @@
       (if (:ok res)
         (do (when-not (:idempotent res)
               (append-flat! "assert" te p r (:ok res))
-              (apply-commit-delta! pre te p))
+              (apply-commit-delta! pre te p)
+              (mark-dirty! te))                    ; S3.3: this module's refers_to are stale
             (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
             {:ok (:ok res)})
         {:reject (:reject res) :version (:version res)}))))
@@ -334,6 +369,7 @@
       (if (:ok res)
         (do (append-flat! "retract" te p r (:ok res))
             (apply-commit-delta! pre te p)
+            (mark-dirty! te)                        ; S3.3: this module's refers_to are stale
             (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
             {:ok (:ok res)})
         {:reject (:reject res) :version (:version res)}))))
@@ -358,52 +394,84 @@
 ;; existing edge set doubles the refers_to edges. These claims are derived/in-memory
 ;; only, so dropping them from the map (rather than appending a supersede) is exactly
 ;; right — nothing durable references them, and they were never written to the flat log.
-(defn- strip-resolve-claims! [st]
-  (let [m @st
-        rp-ids (set (keep (fn [[vid v]] (when (resolve-preds v) vid)) (:values m)))
-        victims (set (keep (fn [[cid cl]] (when (rp-ids (:p cl)) cid)) (:claims m)))]
-    (when (seq victims)
-      (let [drop-from (fn [idx] (reduce-kv (fn [acc k cids]
-                                             (let [kept (vec (remove victims cids))]
-                                               (if (seq kept) (assoc acc k kept) acc)))
-                                           {} idx))]
-        (swap! st (fn [s]
-                    (-> s
-                        (update :claims #(reduce dissoc % victims))
-                        (update :tx-of #(reduce dissoc % victims))
-                        (update :objects #(reduce dissoc % victims))
-                        (update :superseded #(reduce dissoc % victims))
-                        (update :idx-by-l drop-from)
-                        (update :idx-by-p drop-from)
-                        (update :idx-by-r drop-from)
-                        (update :idx-by-lp drop-from)
-                        (update :idx-by-pr drop-from))))))
-    (count victims)))
+;; subj-keep? : an optional predicate on the SUBJECT node-id (:l of the resolve-pred
+;; claim). nil => strip every resolve-pred claim (whole-corpus, the S3.2 behavior).
+;; A set/fn => strip only those whose subject is in scope (S3.3 scoped strip: clear
+;; just the affected modules' derived edges before re-walking them). Correctness:
+;; a resolve-pred claim's subject IS the referencing/binding leaf, and every leaf
+;; belongs to exactly one module (its @<mod># name), so scoping by subject scopes by
+;; module exactly — the untouched modules' edges are left intact.
+(defn- strip-resolve-claims!
+  ([st] (strip-resolve-claims! st nil))
+  ([st subj-keep?]
+   (let [m @st
+         rp-ids (set (keep (fn [[vid v]] (when (resolve-preds v) vid)) (:values m)))
+         victims (set (keep (fn [[cid cl]]
+                              (when (and (rp-ids (:p cl))
+                                         (or (nil? subj-keep?) (subj-keep? (:l cl))))
+                                cid))
+                            (:claims m)))]
+     (when (seq victims)
+       (let [drop-from (fn [idx] (reduce-kv (fn [acc k cids]
+                                              (let [kept (vec (remove victims cids))]
+                                                (if (seq kept) (assoc acc k kept) acc)))
+                                            {} idx))]
+         (swap! st (fn [s]
+                     (-> s
+                         (update :claims #(reduce dissoc % victims))
+                         (update :tx-of #(reduce dissoc % victims))
+                         (update :objects #(reduce dissoc % victims))
+                         (update :superseded #(reduce dissoc % victims))
+                         (update :idx-by-l drop-from)
+                         (update :idx-by-p drop-from)
+                         (update :idx-by-r drop-from)
+                         (update :idx-by-lp drop-from)
+                         (update :idx-by-pr drop-from))))))
+     (count victims))))
 
-;; Materialize refers_to over the warm store, cached by version. Whole-corpus
-;; per version (the correct FIRST CUT — scoped re-resolve is a later step). Under
-;; dlock (called from handle): clear stale refers_to, run the resolver, set version.
-;; The resolver opens a tx (begin-tx! bumps :next-seq + records a :txs entry) — that
-;; would bump current-seq and so make refers-version chase a moving target AND poison
-;; the S1 :query cache key. So we SNAPSHOT the seq-space + supersedes-pred before, and
-;; restore them after: the freshly-minted refers_to claims/values/ids are KEPT (next-id
-;; stays advanced so a later real commit mints past them), but :txs / :next-seq are rolled
-;; back (current-seq unchanged) and :supersedes-pred is restored to the migrate store's
-;; cnf-supersedes (the resolver re-points it at "supersedes"; daemon writes need cnf-supersedes).
-(defn materialize-refers! []
+;; node-ids whose @<mod># name-prefix is in `mods` — the subject scope for a scoped
+;; strip AND the membership test the resolver's module-set walk mirrors. Computed
+;; straight off the store's `name` claims (the same source corpus-from-store! groups by).
+(defn- module-node-ids [st mods]
+  (let [NAME (c/value-id st "name")]
+    (when NAME
+      (set (keep (fn [cid]
+                   (let [cl (c/claim-of st cid)
+                         nm (c/literal st (:r cl))]
+                     (when (contains? mods (module-of-name nm)) (:l cl))))
+                 (c/by-p st NAME))))))
+
+;; restore-seq-space! — the resolver opens a tx (begin-tx! bumps :next-seq + records a
+;; :txs entry); that would bump current-seq, make refers-version chase a moving target,
+;; AND poison the S1 :query cache key. So we SNAPSHOT the seq-space + supersedes-pred
+;; before, and restore them after: the freshly-minted refers_to claims/values/ids are
+;; KEPT (next-id stays advanced so a later real commit mints past them), but :txs /
+;; :next-seq are rolled back (current-seq unchanged) and :supersedes-pred is restored to
+;; the migrate store's cnf-supersedes (the resolver re-points it at "supersedes"; daemon
+;; writes need cnf-supersedes).
+(defn- restore-seq-space! [st before]
+  (swap! st assoc
+         :next-seq        (:next-seq before)
+         :supersedes-pred (:supersedes-pred before)
+         :txs             (:txs before)))
+
+;; Materialize refers_to WHOLE-CORPUS over the warm store: clear ALL stale refers_to,
+;; re-walk every module, restore the seq-space. The cold/first-cut path and the
+;; macro-touch fallback (a defmacro edit's blast radius isn't bounded by imports).
+;; The result is GROUND TRUTH — set-equal to the EDN path (S3.2). Returns the module
+;; set walked (every module) for instrumentation.
+(defn materialize-refers-whole! []
   (let [st (:store @co)
-        before @st]
-    (strip-resolve-claims! st)
-    (resolve/resolve-warm-store! st)         ; side-effect: writes refers_to into st
-    (swap! st assoc
-           :next-seq        (:next-seq before)
-           :supersedes-pred (:supersedes-pred before)
-           :txs             (:txs before))
-    (reset! refers-version (current-seq @co))))
-
-(defn ensure-refers! []
-  (when (not= @refers-version (current-seq @co))
-    (materialize-refers!)))
+        before @st
+        stripped (strip-resolve-claims! st)
+        walk-info (atom nil)]
+    (resolve/resolve-warm-store! st             ; side-effect: writes refers_to for EVERY module
+      (fn [] (reset! walk-info {:forms-walked @resolve/n-forms-walked
+                                :modules-walked @resolve/walked-modules})))
+    (restore-seq-space! st before)
+    {:stripped stripped
+     :forms-walked (:forms-walked @walk-info)
+     :modules-walked (:modules-walked @walk-info)}))
 
 ;; READ-ONLY binding of resolve.clj's accessors over a store: bind ctx + the marker
 ;; value-ids (recomputed against THIS store — store-local ids must match their store)
@@ -428,6 +496,92 @@
                resolve/global-type-exports {} resolve/global-accessor-exports {}]
        (resolve/corpus-from-store!)            ; derive def-binding tables (writes no claims)
        ~@body)))
+
+;; ============================================================================
+;; S3.3 — the classifier + SCOPED materialize.
+;; ============================================================================
+;; classify-affected: given the set of dirty modules, return
+;;   {:affected #{modules to re-walk}  :macro? bool  :export-changed #{mods}}
+;; The rule (binding-SET delta, NOT syntactic site): for each dirty module M, diff M's
+;; live export-set against the snapshot taken at the last materialize. If M's export-set
+;; is UNCHANGED, only M re-resolves (an internal body edit can't change how a consumer
+;; binds M's name — and re-walking ALL of M covers any internal frame-move/shadowing).
+;; If it CHANGED (or M is new / deleted), M PLUS its consumers (modules importing M)
+;; re-resolve, because a consumer's :refer/:as of M now binds a different surface.
+;; Reads the corpus tables (call under with-resolve-read).
+(defn- classify-affected [dirty snapshot]
+  (let [ig          (resolve/import-graph)             ; {module -> #{imports}}
+        consumers   (fn [m] (->> ig (keep (fn [[s imps]] (when (contains? imps m) s))) set))
+        export-now  (fn [m] (resolve/module-export-set m))
+        macro?      (boolean (some resolve/module-has-macro? dirty))   ; whole-corpus fallback
+        changed     (set (filter (fn [m]
+                                   (not= (export-now m)
+                                         (get snapshot m ::absent)))   ; new module => ::absent != set
+                                 dirty))
+        affected    (reduce (fn [acc m] (into acc (consumers m))) (set dirty) changed)]
+    {:affected affected :macro? macro? :export-changed changed}))
+
+;; snapshot EVERY module's current export-set — taken right after a materialize so the
+;; next edit's classifier diffs against a coherent baseline. (Whole-corpus snapshot is
+;; cheap: it's table reads, no walk.)
+(defn- snapshot-exports! [st]
+  (reset! export-snapshot
+          (with-resolve-read st
+            (into {} (map (fn [m] [m (resolve/module-export-set m)])
+                          (filter some? resolve/srcs))))))
+
+;; materialize-refers-scoped! — re-resolve ONLY the affected module set:
+;;   1. classify dirty -> affected (∪ export-changed consumers); macro-touch => whole.
+;;   2. strip refers_to for ONLY the affected modules' node subjects.
+;;   3. resolve/resolve-modules! walks ONLY those modules (full tables, partial walk).
+;;   4. restore the seq-space; re-snapshot export-sets; clear dirty.
+;; The untouched modules' refers_to are left exactly as the previous materialize wrote
+;; them — sound because nothing they bind changed. Returns instrumentation.
+(defn materialize-refers-scoped! []
+  (let [st       (:store @co)
+        before   @st
+        dirty    @dirty-modules
+        {:keys [affected macro? export-changed]}
+        (with-resolve-read st (classify-affected dirty @export-snapshot))]
+    (if macro?
+      ;; defmacro touched — blast radius unbounded by imports; whole-corpus (sound).
+      (let [{:keys [stripped]} (materialize-refers-whole!)]
+        (snapshot-exports! st)
+        (reset! dirty-modules #{})
+        {:mode :whole-macro-fallback :walked :all :stripped stripped :export-changed export-changed})
+      (let [keep-ids (module-node-ids st affected)
+            stripped (strip-resolve-claims! st (or keep-ids #{}))
+            walk-info (atom nil)]
+        (resolve/resolve-modules! st affected
+          (fn [] (reset! walk-info {:forms-walked @resolve/n-forms-walked
+                                    :modules-walked @resolve/walked-modules})))
+        (restore-seq-space! st before)
+        (snapshot-exports! st)
+        (reset! dirty-modules #{})
+        {:mode :scoped :walked affected :stripped stripped :export-changed export-changed
+         :forms-walked (:forms-walked @walk-info)
+         :modules-walked (:modules-walked @walk-info)}))))
+
+;; ensure-refers! — keep refers_to current for the next :callers read. COLD (never
+;; materialized, or an external flat reload reset us): whole-corpus + snapshot. WARM
+;; (some module dirty since last materialize): scoped re-resolve of just the affected
+;; set. CLEAN (no dirty modules): nothing to do. refers-version still tracks the seq
+;; the materialized edges reflect, for the gate's reasoning + status. The version is
+;; NOT the trigger any more (scoped tracks dirty modules, which is finer than seq).
+(defn ensure-refers! []
+  (cond
+    (not @materialized?)
+    (let [r (materialize-refers-whole!)]
+      (snapshot-exports! (:store @co))
+      (reset! dirty-modules #{})
+      (reset! materialized? true)
+      (reset! refers-version (current-seq @co))
+      (reset! last-materialize (assoc r :mode :whole-cold :walked :all)))
+    (seq @dirty-modules)
+    (let [r (materialize-refers-scoped!)]
+      (reset! refers-version (current-seq @co))
+      (reset! last-materialize r))
+    :else nil))
 
 ;; resolve a target binding spec to its node entity-id in `co`. Accepts a direct node
 ;; name "@mod#id", OR a (module name) pair resolved via the def-binding tables (value
@@ -470,6 +624,82 @@
                          [(resolve/name->module (s/name-of resolve/ctx L)) rendered])))))
            set))))
 
+;; ============================================================================
+;; S3.3 gate — the STABLE, id-free keyset of materialized refers_to edges.
+;; ============================================================================
+;; structural-path: a node's slot-path from its module's beagle-file root, using the
+;; AST's parent->child slot edges (fN / childN / segN / commentN / tail). It is id-free
+;; (slot STRINGS) and stable across re-resolve (re-resolve writes refers_to, never the
+;; structural fN edges), so two distinct references with the same rendered name are
+;; distinguished by WHERE they sit — the set can't silently undercount a real diff.
+(defn- parent-slot-index [st]
+  ;; {child-node -> [parent-node "slot"]}. `child` edges duplicate fN; skip them so a
+  ;; node has ONE structural parent edge. A node may appear under multiple slots only
+  ;; via fN (the canonical), so we key on the fN/segN/commentN/tail slot.
+  (let [m @st]
+    (reduce (fn [acc [cid cl]]
+              (let [pstr (c/literal st (:p cl)) r (:r cl)]
+                (if (and (integer? r) (string? pstr)
+                         (or (re-matches #"f\d+" pstr) (re-matches #"seg\d+" pstr)
+                             (re-matches #"comment\d+" pstr) (= pstr "tail")))
+                  (assoc acc r [(:l cl) pstr])
+                  acc)))
+            {} (:claims m))))
+(defn- node-path [psi node]
+  (loop [n node acc []]
+    (if-let [[p slot] (get psi n)]
+      (recur p (conj acc slot))
+      (vec (reverse acc)))))            ; root-down slot path
+
+;; refers-keyset: over a store whose refers_to is materialized, the SET of stable keys
+;; — one per live refers_to edge. Each key: [referencing-module ref-rendered-name
+;; structural-path target-module target-ultimate-name]. Rendered name + render markers
+;; reuse the exact extract-file!/callers-of render logic, so the key tracks the SAME
+;; spelling the projection emits. Pure read — no mutation.
+(defn refers-keyset [st]
+  (with-resolve-read st
+    (let [psi (parent-slot-index st)]
+      (->> (c/by-p resolve/ctx resolve/REFERS)
+           (map #(c/claim-of resolve/ctx %))
+           (keep (fn [cl]
+                   (let [L (:l cl) D (resolve/ultimate (:r cl))
+                         nm     (resolve/binding-name (resolve/refers-target L))
+                         cpfx   (resolve/pred-val L "ctor_prefix")
+                         afield (resolve/pred-val L "accessor_field")
+                         qual   (resolve/pred-val L "qualifier")
+                         fixed? (seq (c/by-lp resolve/ctx L resolve/FIXED))
+                         rendered (cond fixed? (resolve/sym-val L)
+                                        cpfx   (str cpfx nm)
+                                        afield (str (str/lower-case nm) "-" afield)
+                                        qual   (str qual "/" nm)
+                                        :else  nm)]
+                     [(resolve/name->module (s/name-of resolve/ctx L))
+                      rendered
+                      (node-path psi L)
+                      (resolve/name->module (s/name-of resolve/ctx D))
+                      (resolve/binding-name D)])))
+           set))))
+
+;; the gate compares the SCOPED-maintained keyset (read off `co`) against a fresh
+;; WHOLE-CORPUS rebuild (over a CLONE so `co`'s scoped state is untouched). A clone is
+;; (atom @st): the store value is persistent/immutable, so swap!s on the clone never
+;; reach the original. We strip ALL refers_to on the clone, resolve-warm-store! (whole
+;; corpus = ground truth), and read its keyset. Symmetric-difference 0 ⇔ scoped==truth.
+(defn refers-keyset-resp []
+  (let [st     (:store @co)
+        scoped (refers-keyset st)
+        clone  (atom @st)
+        _      (strip-resolve-claims! clone)              ; clear ALL derived edges on the clone
+        _      (resolve/resolve-warm-store! clone)        ; whole-corpus GROUND TRUTH
+        ground (refers-keyset clone)
+        symdiff (clojure.set/union (clojure.set/difference scoped ground)
+                                   (clojure.set/difference ground scoped))]
+    {:scoped-size (count scoped)
+     :ground-size (count ground)
+     :symdiff-size (count symdiff)
+     :symdiff (vec (take 40 symdiff))
+     :version (current-seq @co)}))
+
 (declare maybe-reload!)
 
 (defn handle [req]
@@ -511,6 +741,23 @@
                          :version (current-seq @co)}
                         {:error "no such binding" :te (:te req) :module (:module req) :name (:name req)
                          :version (current-seq @co)})))
+      ;; ---- S3.3 gate surface (test-only reads; no mutation) ------------------
+      ;; :refers-ensure — force the maintenance step (scoped or cold) for the current
+      ;; dirty set, then report what it did: mode, modules walked, edges stripped, and
+      ;; the export-changed set. This is the (d) skipped-work evidence — a scoped run
+      ;; reports :walked = exactly the affected modules, never the corpus.
+      :refers-ensure (do (ensure-refers!)
+                         {:last-materialize @last-materialize
+                          :dirty (vec @dirty-modules)
+                          :version (current-seq @co)})
+      ;; :refers-keyset — the materialized refers_to edge set as STABLE, id-free keys
+      ;; (referencing module + rendered name + structural fN-path + target module +
+      ;; target ultimate name). The gate compares this against a fresh whole-corpus
+      ;; rebuild's keyset: equality (sym-diff 0) is the scoped==whole-corpus proof.
+      ;; ensure-refers! first so the scoped-maintained set is current. :scoped key
+      ;; reads off `co`; :ground recomputes whole-corpus over a CLONE (never disturbs
+      ;; `co`'s scoped state), so both keysets come from the same store snapshot.
+      :refers-keyset (do (ensure-refers!) (refers-keyset-resp))
       {:error "unknown op"})))
 
 ;; ---- socket server (verbatim shape from the proven coord.clj) ---------------
@@ -650,6 +897,7 @@
      (reset! co (if (and (.exists f) (pos? (.length f)))
                   {:store (replay log) :log log :lock (Object.)}
                   (new-coord log))))
+   (reset-refers-state!)                 ; S3.3: fresh store -> next materialize is cold
    (index!)
    @co))
 
@@ -714,6 +962,7 @@
   (reset! flat-log flat)
   (reset! flat-mtime (stamp flat))
   (reset! cache {:index nil :version -1})
+  (reset-refers-state!)                  ; S3.3: derived refers_to belong to the OLD store
   (index!) @co)
 
 ;; absorb external edits (capture/import/set append to the flat log out-of-band).
@@ -732,6 +981,7 @@
         (reset! co (migrate-flat->co @flat-log))
         (reset! flat-mtime st)
         (reset! cache {:index nil :version -1})
+        (reset-refers-state!)            ; S3.3: external rebuild discards in-memory refers_to
         (index!)))))
 
 (defn serve-flat-daemon [port flat]

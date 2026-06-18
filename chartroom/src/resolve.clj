@@ -168,6 +168,10 @@
 (def ^:dynamic n-resolved (atom 0)) (def ^:dynamic n-unresolved (atom 0))
 (def ^:dynamic n-xmod (atom 0)) (def ^:dynamic n-type (atom 0))
 (def ^:dynamic n-comment (atom 0))               ; Turtle #6: comment identifier mentions resolved
+;; S3.3 scoped-walk instrumentation — count the TOP-LEVEL FORMS the walk visited and
+;; the modules it walked, so a caller (the daemon's gate) can prove a scoped re-resolve
+;; is genuinely O(edit-scope): it walks only the affected modules' forms, not O(corpus).
+(def ^:dynamic n-forms-walked (atom 0)) (def ^:dynamic walked-modules (atom #{}))
 (def ^:dynamic *xresolve* (fn [_] nil))          ; cross-module value resolver: name -> {:node :mode :alias}
 (def ^:dynamic *tresolve* (fn [_] nil))          ; type-name -> type-def node (module-local)
 (def ^:dynamic *aresolve* (fn [_] nil))          ; accessor-name `point-x` -> [type-def-leaf field-string]
@@ -532,13 +536,23 @@
   (doseq [e (@file->ents src) :when (= "comment" (kind-of e))]
     (resolve-comment e src)))
 
-(defn run-resolution! []        ; the lexical walk over every bound src (reads bound tables)
-  (doseq [src srcs]
+(defn run-resolution-over! [walk-srcs]   ; the lexical walk over a CHOSEN subset of srcs (reads bound tables)
+  ;; The cross-module tables (global-exports / *xresolve* / file-typeframe / ...) are
+  ;; already bound from the WHOLE corpus, so each walked module's imports resolve
+  ;; against every other module's exports exactly as a full walk would — we just
+  ;; restrict WHICH modules we re-walk (and re-write refers_to for). This is the
+  ;; resolver half of S3.3 scoped re-resolve: full tables, partial walk.
+  (doseq [src walk-srcs]
     (binding [*xresolve* (make-xresolve src)
               *tresolve* (fn [nm] (get (file-typeframe src) nm))
               *aresolve* (fn [nm] (get (file-accessors src) nm))]
-      (walk-all (forms-of src) (list (file-modframe src)))
+      (let [forms (forms-of src)]
+        (swap! walked-modules conj src)
+        (swap! n-forms-walked + (count forms))
+        (walk-all forms (list (file-modframe src))))
       (walk-comments src))))
+(defn run-resolution! []        ; the lexical walk over every bound src (reads bound tables)
+  (run-resolution-over! srcs))
 
 ;; ============================================================================
 ;; resolve-edn! — the RUNNABLE pipeline over an ARBITRARY bound store.
@@ -563,6 +577,7 @@
                FIXED (c/value! store "keep_spelling") QUAL (c/value! store "qualifier")
                CTOR (c/value! store "ctor_prefix") ACC (c/value! store "accessor_field")
                n-resolved (atom 0) n-unresolved (atom 0) n-xmod (atom 0) n-type (atom 0) n-comment (atom 0)
+               n-forms-walked (atom 0) walked-modules (atom #{})
                srcs [] file-modframe {} file-typeframe {} file-accessors {}
                global-exports {} global-type-exports {} global-accessor-exports {}]
        ;; load EDN into the FRESH bound store, then compute the corpus tables from
@@ -626,6 +641,43 @@
           (into {} (map (fn [s] [(module-name s) (module-types s)]) (filter module-name srcs))))
     (set! global-accessor-exports
           (into {} (map (fn [s] [(module-name s) (module-accessors s)]) (filter module-name srcs))))))
+
+;; ============================================================================
+;; S3.3 scoped-classifier helpers — computed from the BOUND warm corpus (call
+;; under a binding that has run corpus-from-store!, e.g. with-resolve-read or
+;; resolve-modules!'s body). These let the daemon classify an edit by its
+;; binding-SET delta (the load-bearing correctness point), not by syntactic site.
+;; ============================================================================
+;; module-src-of: the corpus `src` (= module-name string, in the warm path) for a
+;; node entity-id, via its module prefix. corpus-from-store! keys srcs by module
+;; name, so the `src` and the module name coincide there.
+;; module-export-set: every NAME module M makes resolvable to a consumer — the value
+;; exports (js/export or, beagle-implicit, all top-level defs) UNION the type exports
+;; (records/unions/protocols + variants) UNION the synth field-accessor names. This is
+;; precisely the surface a consumer's :refer/:as/:rename can bind, so a change to THIS
+;; set is exactly what forces a consumer re-walk; an internal body edit leaves it fixed.
+(defn module-export-set [src]
+  (let [v (module-exports src)
+        vexp (if (seq v) v (module-defs src))]   ; beagle implicit-export fallback (mirrors global-exports)
+    (into #{} (concat (keys vexp)
+                      (keys (module-types src))
+                      (keys (module-accessors src))))))
+;; import-graph: {module -> #{modules it imports}} over the whole corpus, from each
+;; module's (ns :require ...) / bare (require ...). Consumers of M = the modules whose
+;; import-set contains M (the reverse edge). Used to widen the dirty set when M's
+;; export-set changed: M PLUS everyone importing M re-resolves.
+(defn module-imports [src]
+  (let [{:keys [refer as rename]} (parse-require src)]
+    (into #{} (concat (vals refer) (vals as) (map first (vals rename))))))
+(defn import-graph []
+  (into {} (map (fn [s] [(module-name s) (module-imports s)]) (filter module-name srcs))))
+;; module-has-macro?: does M define a defmacro at top level? A macro edit can change
+;; how OTHER modules expand, so its blast radius isn't bounded by the import graph —
+;; the daemon falls back to a whole-corpus re-resolve (sound; dormant in fram, which
+;; has zero defmacro).
+(defn module-has-macro? [src]
+  (boolean (some (fn [f] (= "defmacro" (head-sym (unwrap-def f)))) (forms-of src))))
+
 ;; resolve-warm-store! — bind ctx=the daemon's store (+ a fresh tx + the value-ids
 ;; recomputed against THAT store — store-local ids must match their store, the
 ;; same seam GATE B guards), derive the corpus FROM the store, run the lexical
@@ -645,10 +697,44 @@
                FIXED (c/value! store "keep_spelling") QUAL (c/value! store "qualifier")
                CTOR (c/value! store "ctor_prefix") ACC (c/value! store "accessor_field")
                n-resolved (atom 0) n-unresolved (atom 0) n-xmod (atom 0) n-type (atom 0) n-comment (atom 0)
+               n-forms-walked (atom 0) walked-modules (atom #{})
                srcs [] file-modframe {} file-typeframe {} file-accessors {}
                global-exports {} global-type-exports {} global-accessor-exports {}]
        (corpus-from-store!)
        (run-resolution!)
+       (body)))))
+
+;; ============================================================================
+;; S3.3 — resolve-modules! : SCOPED re-resolve over the warm store.
+;; Identical store-binding + corpus derivation to resolve-warm-store! (so it sees
+;; the FULL cross-module export/import tables — M's imports resolve against every
+;; module's exports), but only WALKS (and writes refers_to for) `module-set`. The
+;; caller (the daemon) is responsible for stripping the affected modules' prior
+;; refers_to first (resolve-warm-store! re-walks the whole corpus, so the daemon's
+;; whole-corpus strip suffices there; the scoped path strips only module-set). The
+;; module list is exposed via `body` (corpus-from-store! sets `srcs` = all modules,
+;; so a caller can read it under the binding) and `module-set` selects the walk.
+;; module-set is a set of module-name strings (the `@<module>#` prefix), matching
+;; the keys `srcs` carries after corpus-from-store!. An empty set walks nothing
+;; (a pure table rebuild) — sound when the daemon classified no module dirty.
+;; ============================================================================
+(defn resolve-modules!
+  ([store module-set] (resolve-modules! store module-set (fn [])))
+  ([store module-set body]
+   (let [t   (c/begin-tx! store "resolve-scoped")
+         sup (or (c/value-id store "supersedes") (c/value! store "supersedes"))]
+     (c/set-supersedes-pred! store sup)
+     (binding [ctx store, tx t, SUP sup
+               file->ents (atom {})
+               Vp (c/value! store "v") KIND (c/value! store "kind") REFERS (c/value! store "refers_to")
+               FIXED (c/value! store "keep_spelling") QUAL (c/value! store "qualifier")
+               CTOR (c/value! store "ctor_prefix") ACC (c/value! store "accessor_field")
+               n-resolved (atom 0) n-unresolved (atom 0) n-xmod (atom 0) n-type (atom 0) n-comment (atom 0)
+               n-forms-walked (atom 0) walked-modules (atom #{})
+               srcs [] file-modframe {} file-typeframe {} file-accessors {}
+               global-exports {} global-type-exports {} global-accessor-exports {}]
+       (corpus-from-store!)                          ; FULL tables from the whole store
+       (run-resolution-over! (filter module-set srcs))  ; WALK only the affected module subset
        (body)))))
 
 ;; --- projection: emit EDN for beagle --render, names resolved via refers_to --
