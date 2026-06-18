@@ -1,4 +1,11 @@
 #lang beagle/clj
+;; @claim-canonical — source of truth is the Fram claim graph, not this text.
+;; This .bclj is a regenerated, recompile-gated downstream VIEW (move-3 flip).
+;; Author it as a GRAPH EDIT via the fram MCP tools (add-def / set-body / rename-def),
+;; not Edit/Write — a text edit would desync the graph. The verbs live in
+;; chartroom/src/resolve.clj; the round-trip is byte-stable + recompile-identical
+;; (proven: regen builds byte-for-byte to out/fram/schema.clj). To edit as text you
+;; must first de-adopt (drop this sentinel + the registry line) — a deliberate change.
 ;; ============================================================================
 ;; fram.schema — the CNF schema/identity layer over the kernel.
 ;; ============================================================================

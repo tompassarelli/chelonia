@@ -79,6 +79,27 @@
   (chk "mixed-ref still exposes <pred>-from (has @-values)"
        (boolean (some #(= (:name %) "tag-from") mcat))))
 
+;; (7) GRAPH-AST EDIT tools: structural (always present), and dispatch to the {:edit}
+;; envelope — distinct from {:write} (the host runs it OUT-OF-BAND via resolve.clj).
+(chk "structural edit tools present" (and (has-tool? "add-def") (has-tool? "set-body") (has-tool? "rename-def")))
+(chk "add-def -> {:edit upsert-form} envelope (NOT {:write})"
+     (let [r (call "add-def" {:module "schema" :form "(defn f [x :- Int] :- Int x)"})]
+       (and (nil? (:write r))
+            (= (:edit r) {:op "upsert-form" :module "schema" :form "(defn f [x :- Int] :- Int x)"}))))
+(chk "set-body -> {:edit set-body} envelope"
+     (= (:edit (call "set-body" {:module "schema" :name "cardinality" :body "\"single\""}))
+        {:op "set-body" :module "schema" :name "cardinality" :body "\"single\""}))
+(chk "rename-def -> {:edit rename} envelope"
+     (= (:edit (call "rename-def" {:module "schema" :name "a" :new-name "b"}))
+        {:op "rename" :module "schema" :name "a" :new-name "b"}))
+;; server-side required-param enforcement on the edit verbs (fail-closed, like reads/writes)
+(chk "add-def missing form -> :error"    (contains? (call "add-def" {:module "schema"}) :error))
+(chk "set-body missing name/body -> :error" (contains? (call "set-body" {:module "schema"}) :error))
+(chk "rename-def missing new-name -> :error" (contains? (call "rename-def" {:module "schema" :name "a"}) :error))
+(chk "edit verb missing module -> :error" (contains? (call "add-def" {:form "(def x 1)"}) :error))
+;; the edit envelope is NOT a single-triple write (the coordinator can't carry it)
+(chk "edit envelope carries no single-triple :write key" (nil? (:write (call "set-body" {:module "schema" :name "c" :body "1"}))))
+
 (let [cs @checks fails (filter (fn [[_ ok]] (not ok)) cs)]
   (doseq [[nm ok] cs] (println (if ok "  [PASS] " "  [FAIL] ") nm))
   (if (empty? fails)
