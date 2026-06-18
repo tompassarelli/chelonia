@@ -23,17 +23,20 @@
             [fram.datalog :as d] [cheshire.core :as json]))   ; datalog+json: the `callgraph` mode
 
 (def mode (first *command-line-args*))
-;; ctx (the store the resolver writes refers_to into) + tx (the write unit) are
-;; ^:dynamic so the resolver can run over an ARBITRARY store — the daemon binds them to
-;; its warm live store; the CLI keeps the root binding (script path unchanged). Dynamic
-;; (not a threaded param) means EVERY interior closure reads the bound store uniformly —
-;; no per-fn parameter to miss, which is exactly how the "interior closure still reads
-;; the global" silent-staleness bug is avoided by construction (still gated by a
-;; not-the-root-store test). binding is thread-local => concurrent resolutions don't cross.
-(def ^:dynamic ctx (c/new-store))
-(def ^:dynamic tx  (c/begin-tx! ctx "resolve"))
-(def SUP (c/value! ctx "supersedes")) (c/set-supersedes-pred! ctx SUP)
-(def file->ents (atom {}))
+;; --- bound resolution state (DYNAMIC, inert root) ---------------------------
+;; Every piece of computed resolution state lives in a dynamic var with an INERT
+;; root binding (nil / empty atom). `resolve-edn!` rebinds them all to a FRESH
+;; store before loading EDN, so the resolver runs over an ARBITRARY bound store
+;; (a daemon's warm in-memory store) — not a load-time global. The CLI path is
+;; byte-identical: it just calls `resolve-edn!` inside the same binding scope and
+;; reads the bound vars exactly as before. Predicate/marker VALUE IDS are
+;; store-local (cnf interns ids per store), so they MUST be recomputed against
+;; the fresh store and are dynamic too — keeping a root-store value id would write
+;; a foreign id into store B (the load-bearing seam GATE B guards).
+(def ^:dynamic ctx nil)
+(def ^:dynamic tx  nil)
+(def ^:dynamic SUP nil)
+(def ^:dynamic file->ents (atom {}))
 
 (defn load-edn [path]
   (let [lines (str/split-lines (slurp path))
@@ -48,10 +51,12 @@
     src))
 
 ;; --- claim-graph accessors --------------------------------------------------
-(def Vp (c/value! ctx "v")) (def KIND (c/value! ctx "kind")) (def REFERS (c/value! ctx "refers_to"))
-(def FIXED (c/value! ctx "keep_spelling")) (def QUAL (c/value! ctx "qualifier"))   ; render-mode markers
-(def CTOR (c/value! ctx "ctor_prefix"))    ; a `->Name` auto-constructor ref: render `->` + the type's name
-(def ACC  (c/value! ctx "accessor_field")) ; a synth field accessor `<lower(Name)>-<field>`: stores the field
+;; render-mode marker predicate value-ids — DYNAMIC, rebound (recomputed against
+;; the fresh store) inside `resolve-edn!`; store-local ids must match their store.
+(def ^:dynamic Vp nil) (def ^:dynamic KIND nil) (def ^:dynamic REFERS nil)
+(def ^:dynamic FIXED nil) (def ^:dynamic QUAL nil)   ; render-mode markers
+(def ^:dynamic CTOR nil)    ; a `->Name` auto-constructor ref: render `->` + the type's name
+(def ^:dynamic ACC  nil)    ; a synth field accessor `<lower(Name)>-<field>`: stores the field
 (defn pred-val [e pname]
   (let [P (c/value-id ctx pname)]
     (when P (let [cs (c/by-lp ctx e P)] (when (seq cs) (c/literal ctx (:r (c/claim-of ctx (first cs)))))))))
@@ -158,8 +163,11 @@
     :else []))                                                                        ; literals bind nothing
 
 ;; --- the lexical walk: resolve each reference to its nearest binding ---------
-(def n-resolved (atom 0)) (def n-unresolved (atom 0)) (def n-xmod (atom 0)) (def n-type (atom 0))
-(def n-comment (atom 0))                         ; Turtle #6: comment identifier mentions resolved
+;; resolution counters — DYNAMIC (fresh atoms per `resolve-edn!` call), so a
+;; long-lived daemon's repeated resolves don't accumulate across runs.
+(def ^:dynamic n-resolved (atom 0)) (def ^:dynamic n-unresolved (atom 0))
+(def ^:dynamic n-xmod (atom 0)) (def ^:dynamic n-type (atom 0))
+(def ^:dynamic n-comment (atom 0))               ; Turtle #6: comment identifier mentions resolved
 (def ^:dynamic *xresolve* (fn [_] nil))          ; cross-module value resolver: name -> {:node :mode :alias}
 (def ^:dynamic *tresolve* (fn [_] nil))          ; type-name -> type-def node (module-local)
 (def ^:dynamic *aresolve* (fn [_] nil))          ; accessor-name `point-x` -> [type-def-leaf field-string]
@@ -461,28 +469,31 @@
                                           (keep sym-val (param-binds fb)))))))))
                    (forms-of src))))
 
-(def srcs (mapv load-edn (drop (case mode "resolve" 1 "rename" 4 "delete" 3 "callgraph" 1
-                                          "upsert-form" 3 "set-body" 4) *command-line-args*)))
-(def file-modframe (into {} (map (fn [s] [s (module-defs s)]) srcs)))
-(def file-typeframe (into {} (map (fn [s] [s (module-types s)]) srcs)))
-(def file-accessors (into {} (map (fn [s] [s (module-accessors s)]) srcs)))
+;; --- corpus tables (DYNAMIC, inert root) ------------------------------------
+;; The loaded sources + every frame/export table derived from them. INERT at root
+;; (nil / empty), COMPUTED inside `resolve-edn!` from the FRESHLY-loaded srcs of
+;; the bound store. Functions that read these (def-binding, make-xresolve,
+;; re-resolve!, the mode dispatch) read the dynamic value at call time, so they
+;; see the per-run tables — never a stale load-time global.
+(def ^:dynamic srcs [])
+(def ^:dynamic file-modframe {})
+(def ^:dynamic file-typeframe {})
+(def ^:dynamic file-accessors {})
 (defn def-binding [src nm] (or (get (file-modframe src) nm) (get (file-typeframe src) nm)))  ; value OR type
-(def global-exports          ; module-name -> {exported-name -> binding-node}
-  ;; beagle modules carry an (ns ...) form but export IMPLICITLY (no js/export), so
-  ;; fall back to ALL top-level defs as the export surface. JS modules with explicit
-  ;; js/export use those. (Clojure semantics agree: a public def IS exported.)
-  (into {} (map (fn [s] [(module-name s)
-                         (let [e (module-exports s)] (if (seq e) e (module-defs s)))])
-                (filter module-name srcs))))
-(def global-type-exports     ; module-name -> {type-name -> type-def name-leaf}
-  ;; types export implicitly too; a consumer's :refer/:as of a record/union/protocol
-  ;; resolves here. Without it, a foreign type in a `:- T` annotation never tracks a
-  ;; rename and a cross-module delete of the type false-reports 'safe'.
-  (into {} (map (fn [s] [(module-name s) (module-types s)]) (filter module-name srcs))))
-(def global-accessor-exports ; module-name -> {"point-x" -> [type-name-leaf field]}
-  ;; synthesized field accessors export too; the cross-module half of the local *aresolve*,
-  ;; so a record rename carries c/point-x / :refer'd point-x (parallel to global-type-exports).
-  (into {} (map (fn [s] [(module-name s) (module-accessors s)]) (filter module-name srcs))))
+;; module-name -> {exported-name -> binding-node}
+;; beagle modules carry an (ns ...) form but export IMPLICITLY (no js/export), so
+;; fall back to ALL top-level defs as the export surface. JS modules with explicit
+;; js/export use those. (Clojure semantics agree: a public def IS exported.)
+(def ^:dynamic global-exports {})
+;; module-name -> {type-name -> type-def name-leaf}
+;; types export implicitly too; a consumer's :refer/:as of a record/union/protocol
+;; resolves here. Without it, a foreign type in a `:- T` annotation never tracks a
+;; rename and a cross-module delete of the type false-reports 'safe'.
+(def ^:dynamic global-type-exports {})
+;; module-name -> {"point-x" -> [type-name-leaf field]}
+;; synthesized field accessors export too; the cross-module half of the local *aresolve*,
+;; so a record rename carries c/point-x / :refer'd point-x (parallel to global-type-exports).
+(def ^:dynamic global-accessor-exports {})
 (defn make-xresolve [src]
   (let [{:keys [refer as rename]} (parse-require src)
         ;; a :refer'd / :as-qualified / :rename'd name may be a VALUE or a TYPE export
@@ -521,12 +532,55 @@
   (doseq [e (@file->ents src) :when (= "comment" (kind-of e))]
     (resolve-comment e src)))
 
-(doseq [src srcs]
-  (binding [*xresolve* (make-xresolve src)
-            *tresolve* (fn [nm] (get (file-typeframe src) nm))
-            *aresolve* (fn [nm] (get (file-accessors src) nm))]
-    (walk-all (forms-of src) (list (file-modframe src)))
-    (walk-comments src)))
+(defn run-resolution! []        ; the lexical walk over every bound src (reads bound tables)
+  (doseq [src srcs]
+    (binding [*xresolve* (make-xresolve src)
+              *tresolve* (fn [nm] (get (file-typeframe src) nm))
+              *aresolve* (fn [nm] (get (file-accessors src) nm))]
+      (walk-all (forms-of src) (list (file-modframe src)))
+      (walk-comments src))))
+
+;; ============================================================================
+;; resolve-edn! — the RUNNABLE pipeline over an ARBITRARY bound store.
+;; Binds a FRESH store (ctx/tx/SUP + predicate value-ids recomputed against it),
+;; a fresh file->ents atom, and fresh counters; load-edn's `edn-paths` into that
+;; bound store; computes + binds the corpus tables from those srcs; runs the
+;; resolution driver; then invokes `body` WITHIN the binding scope (so CLI
+;; dispatch — rename/delete/extract/author — and tests read the bound state).
+;; The store is local to this call: a daemon resolving over its warm store gets a
+;; clean store B every time, and NOTHING leaks to the inert root binding.
+;; ============================================================================
+(defn resolve-edn!
+  ([edn-paths] (resolve-edn! edn-paths (fn [])))
+  ([edn-paths body]
+   (let [store (c/new-store)
+         t     (c/begin-tx! store "resolve")
+         sup   (c/value! store "supersedes")]
+     (c/set-supersedes-pred! store sup)
+     (binding [ctx store, tx t, SUP sup
+               file->ents (atom {})
+               Vp (c/value! store "v") KIND (c/value! store "kind") REFERS (c/value! store "refers_to")
+               FIXED (c/value! store "keep_spelling") QUAL (c/value! store "qualifier")
+               CTOR (c/value! store "ctor_prefix") ACC (c/value! store "accessor_field")
+               n-resolved (atom 0) n-unresolved (atom 0) n-xmod (atom 0) n-type (atom 0) n-comment (atom 0)
+               srcs [] file-modframe {} file-typeframe {} file-accessors {}
+               global-exports {} global-type-exports {} global-accessor-exports {}]
+       ;; load EDN into the FRESH bound store, then compute the corpus tables from
+       ;; THOSE srcs (set! the thread-local binding — never the root value).
+       (set! srcs (mapv load-edn edn-paths))
+       (set! file-modframe (into {} (map (fn [s] [s (module-defs s)]) srcs)))
+       (set! file-typeframe (into {} (map (fn [s] [s (module-types s)]) srcs)))
+       (set! file-accessors (into {} (map (fn [s] [s (module-accessors s)]) srcs)))
+       (set! global-exports
+             (into {} (map (fn [s] [(module-name s)
+                                    (let [e (module-exports s)] (if (seq e) e (module-defs s)))])
+                           (filter module-name srcs))))
+       (set! global-type-exports
+             (into {} (map (fn [s] [(module-name s) (module-types s)]) (filter module-name srcs))))
+       (set! global-accessor-exports
+             (into {} (map (fn [s] [(module-name s) (module-accessors s)]) (filter module-name srcs))))
+       (run-resolution!)
+       (body)))))
 
 ;; --- projection: emit EDN for beagle --render, names resolved via refers_to --
 ;; follow refers_to transitively (re-export chains: a (js/export name) re-export is
@@ -773,6 +827,19 @@
     (doseq [src srcs] (println (str "projected -> " (out-path src) "   <- " src)))))
 
 ;; ============================================================================
+;; CLI entry. Slice the edn paths off *command-line-args* per mode (the old
+;; `(def srcs ...)` slice), then run the WHOLE pipeline + mode dispatch inside
+;; one `resolve-edn!` binding scope, so dispatch reads the freshly-bound store /
+;; tables / counters exactly as the old top-level code did. GUARDED: loaded as a
+;; library (no recognized mode), nothing runs — no load-edn over mis-sliced args.
+(def MODES #{"resolve" "rename" "delete" "callgraph" "upsert-form" "set-body"})
+(defn -main []
+  (let [edn-paths (drop (case mode "resolve" 1 "rename" 4 "delete" 3 "callgraph" 1
+                                   "upsert-form" 3 "set-body" 4)
+                        *command-line-args*)]
+    (resolve-edn!
+     edn-paths
+     (fn []
 (case mode
   "resolve"
   (binding [*out* *err*]
@@ -1048,4 +1115,10 @@
                        (count defn-meta) (count edges) (count reaches))))
     (println (json/generate-string
               {:defns (vec (vals defn-meta)) :edges edges
-               :blast (into {} (map (fn [[k vs]] [k (vec vs)]) blast))}))))
+               :blast (into {} (map (fn [[k vs]] [k (vec vs)]) blast))}))))))))
+
+;; GUARD: run the pipeline only when invoked as a CLI with a recognized mode.
+;; Loaded as a library (no mode arg, or an unrecognized one), this is a no-op —
+;; so a daemon can `require`/load this file and call `resolve-edn!` over its own
+;; warm store without the old top-level load-edn crashing on mis-sliced args.
+(when (MODES mode) (-main))
