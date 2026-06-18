@@ -15,7 +15,7 @@
 (require '[clojure.string :as str] '[clojure.edn :as edn]
          '[fram.cnf :as c] '[fram.schema :as s]
          '[fram.kernel :as ck]
-         '[fram.fold :as fold] '[fram.rt])
+         '[fram.fold :as fold] '[fram.query :as q] '[fram.rt])
 (import '[java.net ServerSocket Socket InetSocketAddress]
         '[java.io BufferedReader InputStreamReader OutputStreamWriter BufferedWriter FileInputStream]
         '[javax.net.ssl SSLContext KeyManagerFactory TrustManagerFactory]
@@ -120,12 +120,80 @@
                                  (if (c/value-object? st (:r cl)) (c/literal st (:r cl)) (s/name-of st (:r cl))))))))
          vec)))
 
-;; warm read index — cold-recompute on version change (the v1 decision).
-(defn index! []
+;; ---- index-accelerated read path (warm) ------------------------------------
+;; The scan path (fram.query/run) pulls the WHOLE "triple" relation per literal
+;; (datalog match-lit). For the common shape — ONE non-recursive rule whose body is
+;; "triple" literals with bound predicate+object — we instead probe a by-[p r] index.
+;; The index is STRING-KEYED and built from the SAME claims the scan sees, so it is
+;; provably a regrouping of the scan's own tuples: NO int<->string translation, hence
+;; no silent-mistranslation hazard. q/run stays the untouched ORACLE; anything not of
+;; the simple shape (recursion, negation, derived rels, unbound p/r) falls back to it.
+(defn- idx-build [claims]
+  (let [triples (mapv (fn [c] [(:l c) (:p c) (:r c)]) claims)]
+    {:triples triples
+     :by-pr (reduce (fn [m t] (update m [(nth t 1) (nth t 2)]
+                                      (fn [o] (conj (or o []) t)))) {} triples)}))
+
+(defn- var-term? [t] (and (map? t) (contains? t :var)))
+(defn- unify1 [arg val s]
+  (if (var-term? arg)
+    (let [k (:var arg) b (get s k ::none)]
+      (if (= b ::none) (assoc s k val) (if (= b val) s nil)))
+    (if (= arg val) s nil)))
+(defn- unify-tuple [args tup s]
+  (if (not= (count args) (count tup)) nil
+    (loop [a args t tup acc s]
+      (cond (nil? acc) nil (empty? a) acc
+            :else (recur (rest a) (rest t) (unify1 (first a) (first t) acc))))))
+(defn- resolve-arg [arg s] (if (var-term? arg) (get s (:var arg) ::unbound) arg))
+;; candidate tuples for a "triple" literal: by-pr probe when BOTH p,r ground, else scan.
+(defn- lit-candidates [idx litt s]
+  (let [args (:args litt)
+        p (resolve-arg (nth args 1) s) r (resolve-arg (nth args 2) s)]
+    (if (and (not= p ::unbound) (not= r ::unbound))
+      (get (:by-pr idx) [p r] [])
+      (:triples idx))))
+(defn- eval-body-idx [idx body]
+  (reduce (fn [substs litt]
+            (reduce (fn [acc s]
+                      (reduce (fn [a tup] (let [s2 (unify-tuple (:args litt) tup s)]
+                                            (if s2 (conj a s2) a)))
+                              acc (lit-candidates idx litt s)))
+                    [] substs))
+          [{}] body))
+(defn- ground-head [args s] (mapv (fn [t] (if (var-term? t) (get s (:var t)) t)) args))
+;; the simple shape the index serves; everything else -> q/run (the oracle).
+(defn- simple-query? [q]
+  (and (map? q) (not (contains? q :strata)) (vector? (:rules q)) (= 1 (count (:rules q)))
+       (let [rule (first (:rules q)) body (:body rule)]
+         (and (map? rule) (vector? body) (seq body)
+              (not= (:rel (:head rule)) "triple")
+              (every? (fn [l] (and (map? l) (= "triple" (:rel l)) (not (:neg l))
+                                   (vector? (:args l)) (= 3 (count (:args l))))) body)))))
+;; index-accelerated run — SAME validation boundary as q/run, SAME head-tuple set.
+(defn- idx-run [idx q]
+  (let [errs (q/validate q)]
+    (if (seq errs) {:error errs}
+      (let [rule (first (:rules q))
+            substs (eval-body-idx idx (:body rule))
+            tuples (reduce (fn [acc s] (conj acc (ground-head (:args (:head rule)) s))) #{} substs)]
+        {:ok (vec tuples)}))))
+
+;; warm read cache — cold-recompute on version change (the v1 decision). Holds the
+;; kernel read-index, the reified->flat claims vec (scan path / q/run oracle), AND the
+;; by-[p r] index (fast path). All pure functions of the coordinator's seq, rebuilt
+;; only when a commit advances the version.
+(defn warm! []
   (let [v (current-seq @co)]
     (when (not= v (:version @cache))
-      (reset! cache {:index (ck/build-index (reified->claims @co)) :version v}))
-    (:index @cache)))
+      (let [claims (reified->claims @co)]
+        (reset! cache {:index (ck/build-index claims) :claims claims
+                       :idx (idx-build claims) :version v})))
+    @cache))
+
+(defn index! [] (:index (warm!)))
+(defn warm-claims [] (:claims (warm!)))
+(defn warm-idx [] (:idx (warm!)))
 
 ;; Subscriber delivery is BEST-EFFORT and OFF the write path (finding #3): a slow
 ;; or stuck subscriber (TCP send buffer full) must NOT stall commits, which run
@@ -196,6 +264,15 @@
       :assert   (do-assert (:te req) (:p req) (:r req) (:base req))
       :retract  (do-retract (:te req) (:p req) (:r req) (:base req))
       :validate {:violations (all-violations (index!))}
+      ;; AST/Datalog query over the WARM in-memory graph — the read surface the cold
+      ;; CLI/MCP path lacked. Runs fram.query/run (validate + fixpoint) against the
+      ;; version-cached claims vec, so a callers-of/blast-radius/bridge query never
+      ;; pays the ~3.8s log fold. Result is q/run's {:ok tuples} | {:error msgs}
+      ;; envelope, stamped with the snapshot version the answer reflects.
+      :query    (let [qy (:query req)
+                      use-idx (and (not (:scan req)) (simple-query? qy))
+                      res (if use-idx (idx-run (warm-idx) qy) (q/run (warm-claims) qy))]
+                  (assoc res :version (current-seq @co) :engine (if use-idx "index" "scan")))
       :status   {:version (current-seq @co) :claims (count (c/current-claims (:store @co))) :log (or @flat-log (:log @co))}
       {:error "unknown op"})))
 
