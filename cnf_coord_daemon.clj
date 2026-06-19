@@ -587,11 +587,21 @@
 ;; name "@mod#id", OR a (module name) pair resolved via the def-binding tables (value
 ;; OR type defs) the resolver builds from the warm corpus — the SAME resolution the
 ;; EDN path uses, so the daemon and EDN agree on which node a binding name denotes.
+;;
+;; For the :te path we follow `ultimate` so that a node which is itself a REFERENCE
+;; (a leaf carrying refers_to, e.g. the `k/->Claim` reference @import#398) resolves to
+;; the BINDING it denotes (here the kernel defrecord Claim @kernel#298), chasing
+;; re-export/alias chains. This is idempotent for binding nodes — `ultimate` returns a
+;; binding unchanged (a binding has no refers_to) — so callers may key :callers on a
+;; reference site and have the daemon perform reference->ultimate->reverse-lookup in
+;; ONE round-trip, exactly the resolution a text agent must do by hand. A {:module
+;; :name} target is already a binding, so it is NOT re-ultimated.
 (defn- target-node [req]
   (let [st (:store @co)]
     (cond
-      (:te req)                              ; "@mod#id" -> entity-id
-      (s/resolve-name st (:te req))
+      (:te req)                              ; "@mod#id" -> entity-id, then ultimate->binding
+      (when-let [n (s/resolve-name st (:te req))]
+        (with-resolve-read st (resolve/ultimate n)))
       (and (:module req) (:name req))
       (with-resolve-read st (resolve/def-binding (:module req) (:name req)))
       :else nil)))
