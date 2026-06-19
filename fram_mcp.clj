@@ -338,14 +338,26 @@
 
 ;; --- dispatch one tools/call -------------------------------------------------
 (defn handle-call [name args]
-  (let [{:keys [claims idx cat]} (load-state)
-        res (tl/call claims idx cat name (or args {}))]
-    (cond
-      (:error res) {:isError true :text (str/join "\n" (:error res))}
-      (:write res) (route-write (:write res))
-      (:edit res)  (route-edit (:edit res))
-      (contains? res :ok) {:text (json/generate-string (:ok res))}
-      :else {:text (json/generate-string (:rows res))})))
+  (let [a (or args {})]
+    ;; WARM READ PATH (interface investigation #1): serve `query` off the daemon's warm
+    ;; store instead of a COLD full-log fold per request (~60x: ~450ms cold vs ~7ms warm
+    ;; on the canonical log). coord-query returns nil if the daemon is DOWN or PREDATES
+    ;; the warm :query op ({:error "unknown op"}) -> fall through to the cold path, so
+    ;; this is safe even against an older live daemon (no coordinated restart required).
+    ;; The warm :query op returns the SAME q/run envelope the cold path produces, so the
+    ;; formatting is identical. Rep-stable: keys on (l,p,r)/Datalog, no fN ordering.
+    (if-let [warm (when (= name "query") (fram.rt/coord-query (fram.rt/coord-port) (:query a)))]
+      (cond (:error warm)        {:isError true :text (str/join "\n" (:error warm))}
+            (contains? warm :ok) {:text (json/generate-string (:ok warm))}
+            :else                {:text (json/generate-string warm)})
+      (let [{:keys [claims idx cat]} (load-state)
+            res (tl/call claims idx cat name a)]
+        (cond
+          (:error res) {:isError true :text (str/join "\n" (:error res))}
+          (:write res) (route-write (:write res))
+          (:edit res)  (route-edit (:edit res))
+          (contains? res :ok) {:text (json/generate-string (:ok res))}
+          :else {:text (json/generate-string (:rows res))})))))
 
 ;; wall-clock budget on the AI-facing path: validation makes a query STRUCTURALLY
 ;; safe, but evaluation is naive, so a deeply recursive query can be slow. Bound it
