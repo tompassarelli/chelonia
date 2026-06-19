@@ -66,5 +66,14 @@
      (= before-replace (spell-count "replace!")))
 (chk "rename did NOT partially introduce the new spelling" (zero? (spell-count "supersede-prior!")))
 
+;; --- #26: unknown verb rejects cleanly (must NOT hard-exit the daemon) ---
+;; If the unknown-op path still fell through to run-verb-warm!'s (System/exit 2), this whole
+;; test JVM would die here and NONE of the assertions below would run — so reaching them is itself
+;; the proof that the daemon does not hard-exit on a malformed :edit-min verb.
+(def bogus (edit-min! {:op "bogus-verb-zzz" :module "schema"}))
+(chk "unknown :edit-min verb rejected (not :ok)" (not (:ok bogus)))
+(chk "unknown-verb reject names it as unknown" (boolean (re-find #"(?i)unknown" (pr-str (:reject bogus)))))
+(chk "process continued after unknown-verb (no hard-exit)" true)
+
 (println (str "\n---- edit-min CORE (in-process): " (if (zero? @fails) "ALL PASS" (str @fails " FAIL")) " ----"))
 (System/exit (if (zero? @fails) 0 1))

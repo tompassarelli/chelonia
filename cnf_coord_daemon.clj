@@ -820,6 +820,12 @@
 (defn- do-edit-min [spec]
   (let [module (:module spec)]
     (when (str/blank? module) (throw (ex-info "edit-min: :module required" {})))
+    ;; (#26) reject UNKNOWN verbs early — before the expensive clone/corpus build and before
+    ;; they can fall through to run-verb-warm!'s `(System/exit 2)` default, which would HARD-EXIT
+    ;; the daemon on a malformed client request. Known verbs: set-body, upsert-form, rename.
+    (when-not (#{"set-body" "upsert-form" "rename"} (:op spec))
+      (throw (ex-info (str "edit-min: unknown verb '" (:op spec) "' (known: set-body, upsert-form, rename)")
+                      {:reject :unknown-verb})))
     ;; GRAPH RENAME IS IDENTITY-DEFERRED — reject, do NOT silently do the wrong thing.
     ;; verb-rename! is O(1): it rewrites the DEF binding's spelling only and relies on
     ;; references following refers_to (identity). On the mainline SPELLING+derive model a
