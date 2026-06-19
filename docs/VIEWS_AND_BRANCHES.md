@@ -141,6 +141,21 @@ case is path-selection, not conflict, and the substrate's safety story rests on 
 it *does* assert: identity (closed) and whatever single-valued predicates a domain declares
 (enforced at the write side, as §6 shows).
 
+**Raw `:retract` of a referenced binding — INTENDED view-local incoherence, not "deferred":**
+distinguish two surfaces. The `:edit-min` *verb* surface is guarded (rename rejects; set-body/upsert
+are name-stable/name-keyed — §6, and verb dispatch is exhaustively `{set-body, upsert-form, rename}`).
+The lower-level raw `:assert`/`:retract` op surface is **not** guarded and does **not** reject: a raw
+`:retract` that drops a referenced binding's claim **commits**, and `main` becomes *view-locally
+incoherent* (its references re-derive to an undefined name) until someone cold-renders/recompiles main.
+There is no global gate forcing that recompile (the convergence gate was deliberately not built), so the
+incoherence is **latent until observed**. This is **intended** under §2 (no write-time conflicts), §4
+(dangling = view-local, not corruption), and §5 (convergence is a per-publication choice) — it is an
+explicit author op leaving a view-local incoherence, **not** substrate corruption and **not** a guarded
+"deferred" path. (Contrast: the *rename verb* is genuinely deferred — it rejects. `:retract` is intended,
+not deferred. The word matters: a guarded path is deferred; an unguarded-by-design path is intended.)
+So: someone who finds `main` un-resolvable after a raw `:retract` should read this as designed behavior,
+not file a corruption bug.
+
 ## 8. Verified findings + the minimal "view" representation
 
 A 4-perspective adversarial check (steelman each invariant, code-ground, hunt failure modes; each
