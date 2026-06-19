@@ -147,11 +147,18 @@ point git conflicts, Fram-today corrupts, C would converge — carrying the #11b
   only on pass — **with a real view boundary so speculative claims are NOT visible
   to ordinary readers** — is **not built**. Until it is, "Fram can do git's
   guarantee" is *architectural*, not demonstrated.
-- **UNMEASURED (the proxy is a confound):** that Fram's git-mode gate is **cheaper**
-  than git's. The only proxy run (S3.3 scoped re-resolve) measured a *different
-  operation* dominated by `corpus-from-store!`; it is not evidence about gate cost
-  (see §2). Cheaper-gate is **not refuted and not a headwind — it is untested.** The
-  decisive, cheap probe (can a gate avoid `corpus-from-store!`?) is Leg 1, Phase 0.
+- **UNMEASURED (the proxy is a confound); Phase-0 probe ran:** that Fram's git-mode
+  gate is **cheaper** than git's. The only proxy (S3.3 scoped re-resolve) measured a
+  *different operation* dominated by `corpus-from-store!`; not evidence about gate
+  cost (§2). The Phase-0 feasibility probe (read-only) then asked "can a gate avoid
+  `corpus-from-store!`?" and found: **the cheaper-gate is a real build, not a cheap
+  measurement.** The gate's hard part — "does each staged reference resolve *in
+  scope*" — needs per-module def-binding/export **frame tables** that are derived
+  from AST structure (no `:variant-of`-style predicate; bindings are extracted by
+  walking forms) and are **not maintained**. Spectrum: best case **YELLOW** (use the
+  existing `*corpus-scope*` hook + import graph to build only the import-closure's
+  frames), worst case **RED** (build maintained `exports_of` indexes). Either way a
+  real arc. **So cheaper-gate is the *sequel*, not a near-term measurement.**
 - **REAL, SEPARATE finding:** the *current derived-read path* (S3.3 scoped
   re-resolve) does not beat whole-corpus at K=11. This bounds swarm-mode's
   derived-read cost; it is not about the gate.
@@ -197,6 +204,17 @@ whether the rest is worth building.
   pre-publish; **measure gate time and scope**; include ≥1 leaf and ≥1 hub edit and a
   larger synthetic K (K=11 is too small to show scaling); compare to the merge queue.
   Do NOT claim "cheaper than git" unless the gate demonstrably avoids the fixed scan.
+
+**Phase 0 RESULT (ran, read-only — `86970d4`/this arc):** the cheaper-gate is **a
+real build, not a cheap measurement.** The gate's hard part ("does each staged
+reference resolve *in scope*") needs per-module def-binding/export frame tables that
+are AST-structural and unmaintained (`corpus-from-store!` rebuilds them). Best case
+YELLOW (leverage the existing `*corpus-scope*` hook + import graph to scope frame
+building to the import-closure); worst case RED (build maintained `exports_of`
+indexes). RED-vs-YELLOW doesn't change the near-term decision — both are a real arc.
+**Decision: Phase 1/2 DEFERRED. The talk stands on the banked "more than git" half;
+the cheaper-gate is a specified sequel** (its first task: resolve RED-vs-YELLOW by
+testing whether `*corpus-scope*` can build only the import-closure's frames).
 
 **Leg 3 — the curve (synthesis).** Same workload, sweep Fram from git-mode to
 swarm-mode; plot git as a single fixed dot on the coherence↔visibility frontier.
