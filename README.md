@@ -15,6 +15,14 @@ you don't maintain them.
 > single-valued predicate set) — overridable (`FRAM_SINGLE_VALUED`) but baked in.
 > CLI-shaped: the payoff is the graph and the derived queries, not chrome.
 
+> **"Isn't this just Datomic / Datahike / an RDF store?"** No — and the reason is
+> the *atom*, not the features. Fram's unit is the **claim-object**: a fact that is
+> itself addressable and reifiable at per-fact granularity. The datom isn't, and an
+> RDF store treats statement-level reification as a bolt-on. Concurrency, Datalog,
+> and schema-as-data are *not* why Fram exists (off-the-shelf stores tie or win
+> there) — the primitive is. The full argument, written to survive a skeptic and
+> with the negative space conceded, is in **[docs/WHY_FRAM_EXISTS.md](docs/WHY_FRAM_EXISTS.md)**.
+
 ## One engine, many consumers
 
 Fram is the **engine**, not an app. The relational structure is shared, so the
