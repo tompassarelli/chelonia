@@ -104,11 +104,40 @@
               (when-let [cid (select-main-1 cs)] (c/literal ctx (:r (c/claim-of ctx cid))))))))
 (defn kind-of [e] (pred-val e "kind"))                                  ; default-main kind of node e
 (defn sym-val [e] (when (= "symbol" (kind-of e)) (pred-val e "v")))     ; default-main spelling of a symbol
-(defn ordered-children [e]
+;; ---- CRDT order keys (#36): positions as DATA, insert-anywhere commute ----------
+;; A child-position predicate is "f<path>~<tie>": path = logoot int-vector (dense — a
+;; path strictly between any two always exists), tie = the child node's atomic name-int
+;; (unique -> concurrent same-gap inserts get DISTINCT keys -> both land -> commute).
+;; Compare by (path, tie). DUAL parser: also reads the OLD "f<int>" format (path
+;; [(inc i)*STEP], tie 0) so the resolver keeps working during corpus migration.
+;; Library confirmed standalone in cnf_ordkey_test.clj (Stage A, 12/12).
+(def ORD-STEP 65536)
+(defn ord-parse [p]                            ; -> {:path [int...] :tie int} | nil
+  (when (string? p)
+    (if-let [[_ ps ts] (re-matches #"f(\d+(?:\.\d+)*)~(\d+)" p)]
+      {:path (mapv #(Long/parseLong %) (str/split ps #"\.")) :tie (Long/parseLong ts)}
+      (when-let [[_ d] (re-matches #"f(\d+)" p)]
+        {:path [(* (inc (Long/parseLong d)) ORD-STEP)] :tie 0}))))
+(defn ord-pos? [p] (boolean (ord-parse p)))    ; is p a child-position predicate (old or new)?
+(defn ord-str [path tie] (str "f" (str/join "." path) "~" tie))
+(defn ord-veccmp [a b]
+  (loop [a (seq a) b (seq b)]
+    (cond (and (nil? a) (nil? b)) 0 (nil? a) -1 (nil? b) 1
+          :else (let [c (compare (long (first a)) (long (first b)))] (if (zero? c) (recur (next a) (next b)) c)))))
+(defn ord-cmp [x y] (let [c (ord-veccmp (:path x) (:path y))] (if (zero? c) (compare (:tie x) (:tie y)) c)))
+(defn ord-append [last-path] (if (empty? last-path) [ORD-STEP] (conj (vec (butlast last-path)) (+ (long (last last-path)) ORD-STEP))))
+(defn ord-between [lo hi]                       ; a path strictly between lo and hi (nil = open end)
+  (cond (and (nil? lo) (nil? hi)) [ORD-STEP]
+        (nil? hi) (ord-append lo)
+        :else (let [lo (or lo [0])]
+                (loop [i 0 acc []]
+                  (let [a (long (get lo i 0)) b (long (get hi i (+ a (* 2 ORD-STEP))))]
+                    (if (> (- b a) 1) (conj acc (quot (+ a b) 2)) (recur (inc i) (conj acc a))))))))
+
+(defn ordered-children [e]                     ; fN children, in CRDT-key (path,tie) order
   (->> (c/by-l ctx e) (map #(c/claim-of ctx %))
-       (keep (fn [cl] (let [p (c/literal ctx (:p cl))]
-                        (when (and (string? p) (re-matches #"f\d+" p)) [(parse-long (subs p 1)) (:r cl)]))))
-       (sort-by first) (mapv second)))
+       (keep (fn [cl] (when-let [k (ord-parse (c/literal ctx (:p cl)))] [k (:r cl)])))
+       (sort-by first ord-cmp) (mapv second)))
 (defn ordered-segs [e]                         ; Turtle #6: a comment node's segN children, in order
   (->> (c/by-l ctx e) (map #(c/claim-of ctx %))
        (keep (fn [cl] (let [p (c/literal ctx (:p cl))]
