@@ -73,7 +73,9 @@
 ;; latency exceeds fram's). NO failures here (R2 is the clean continuous-arrival regime).
 ;; ============================================================================
 (def K 32)
-(def C-family [100 1000 10000])              ; CI duration ms: 0.1s, 1s, 10s (MODELED, swept)
+;; CI duration ms. 3880 is MEASURED (real build-all recompile of the rendered schema module —
+;; cnf_coord_experiment.clj, 2 runs 3912/3848ms); the others bracket it (modeled, swept).
+(def C-family [100 1000 3880 10000])
 (def intervals [5000 1000 200 50 10])        ; inter-arrival ms: slow -> fast
 (println "=== #11 R2 — continuous arrival (K=" K "edits, evenly spaced). SIMULATION. ===")
 (println "   Fram commit=70ms (measured #14); git CI duration C modeled+swept. latency = ready->landed (ms).\n")
