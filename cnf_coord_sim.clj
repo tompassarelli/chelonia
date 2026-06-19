@@ -94,6 +94,22 @@
                      (if cross (str cross "ms (= " (format "%.1f" (/ 1000.0 cross)) " edits/sec)") "never in swept range")))))
 
 ;; ============================================================================
+;; GIT-ARM ANTI-STRAWMAN GOVERNOR — R1's acceptance test, applied to the SIM's git arm.
+;; A faithful speculative queue AMORTIZES HARDER as arrival climbs (more edits per batch ->
+;; FEWER CIs). A Bors/serial strawman would not. So git validation-runs must be NON-INCREASING
+;; as the inter-arrival interval shrinks (arrival speeds up). If it rises, the sim's git arm is a
+;; strawman and R2 is void — the same governor R1's REAL git arm had (validation-runs O(1) or void).
+;; ============================================================================
+(println "=== GIT-ARM governor (C=1000ms): does the sim's git queue WIDEN batches with arrival? ===")
+(def gov (mapv (fn [iv] [iv (:validation-runs (sim-git (arrivals K iv) 1000 #{}))]) intervals))   ; intervals slow->fast
+(doseq [[iv n] gov]
+  (println (format "    interval=%-7s git validation-runs=%-3d (avg batch ~%d edits)" (str iv "ms") n (long (Math/ceil (/ K (max 1 n)))))))
+(def gov-faithful (apply >= (map second gov)))   ; non-increasing slow->fast = batches widen
+(println (format "    validation-runs NON-increasing as arrival speeds (batches WIDEN = faithful queue, NOT serial strawman)? %s" gov-faithful))
+(println (if gov-faithful "    => the sim's git arm passes R1's anti-strawman test. R2 latency is vs a real batching queue.\n"
+                          "    => STRAWMAN: git never amortizes; R2 is VOID. Fix the queue model.\n"))
+
+;; ============================================================================
 ;; R3 — FAILURE-HEAVY: fixed fast arrival, sweep failure fraction. git's batch poisons +
 ;; bisects (validation-runs blow up, good edits delayed); fram isolates (per-edit).
 ;; ============================================================================
