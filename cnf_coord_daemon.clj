@@ -1036,6 +1036,21 @@
       ;; reads off `co`; :ground recomputes whole-corpus over a CLONE (never disturbs
       ;; `co`'s scoped state), so both keysets come from the same store snapshot.
       :refers-keyset (do (ensure-refers!) (refers-keyset-resp))
+      ;; :resolved — surface the MULTIPLICITY of a (te,pred) group instead of hiding it
+      ;; behind first-live. P-of/select-main-1 return (first) — a SELECTION, not a
+      ;; uniqueness proof (#19) — so a contested single-valued field reads as a silently
+      ;; arbitrary pick. This returns {:value <first> :members <n> :ambiguous? (> n 1)
+      ;; :values [...]} so an agent gets a CHECKABLE answer. Pure read over the live
+      ;; (l,p) group — rep-stable (no fN). (interface investigation #3)
+      :resolved (let [st (:store @co)
+                      e (s/resolve-name st (:te req))
+                      pid (c/value-id st (:p req))
+                      live (if (and e pid) (live-cids-lp @co e pid) [])
+                      vals (mapv (fn [cid] (let [r (:r (c/claim-of st cid))]
+                                             (if (c/value-object? st r) (c/literal st r) (s/name-of st r))))
+                                 live)]
+                  {:value (first vals) :members (count vals) :ambiguous? (> (count vals) 1)
+                   :values vals :version (current-seq @co)})
       {:error "unknown op"}))))
 
 ;; ---- socket server (verbatim shape from the proven coord.clj) ---------------
