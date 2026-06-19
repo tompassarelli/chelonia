@@ -1,0 +1,137 @@
+#!/usr/bin/env bb
+;; ============================================================================
+;; fram-ingest-code — THE FLIP, stage 1: .bclj source tree -> canonical CODE log.
+;; ============================================================================
+;; Demotes .bclj TEXT from source-of-truth to a generated view: ingest each
+;; module's AST (via `racket --emit-edn`) into a per-repo, dedicated flat claim
+;; log (.fram/code.log), re-keying every file-local integer node id `n` to the
+;; node NAME `@<module>#n`. The existing daemon boots from this UNCHANGED via
+;; `serve-flat <PORT> <code.log>`, because migrate-flat->co (cnf_coord_daemon.clj)
+;; names every entity by its :l subject string (s/name!), producing exactly the
+;; @mod#int names corpus-from-store! / module-of-name require, and @-prefixed
+;; objects become links.
+;;
+;; The log carries ONLY the AST (kind/v/fN/child/segN/commentN/tail + a per-module
+;; @<mod>#root file "<path>" bookkeeping claim). refers_to + render markers are
+;; DERIVED — they are materialized in-memory over the warm store at resolution
+;; time (resolve-preds), never persisted. (See DESIGN.md §2.)
+;;
+;; USAGE:
+;;   bin/fram-ingest-code <src-dir-or-file> [<src-dir-or-file> ...]
+;;     [--out <code.log>]      default: $PWD/.fram/code.log
+;;     [--module <name>]       restrict to ONE module by name substring (the flip
+;;                             experiment ingests ONLY schema; this is how)
+;;     [--append]              append to an existing log (default: TRUNCATE+write)
+;;
+;; The default ingests every .bclj it finds (staged adoption uses this); the flip
+;; experiment passes `--module schema` so ONLY schema.bclj is folded.
+;;
+;; Env (overridable for CI/tests; defaults match the live tree):
+;;   BEAGLE_HOME   (default ~/code/beagle)
+;;   FRAM_ROUNDTRIP (default $BEAGLE_HOME/beagle-lib/private/claims-roundtrip.rkt)
+;; ============================================================================
+(require '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[clojure.edn :as edn]
+         '[babashka.process :as proc])
+
+(defn- die [& xs] (binding [*out* *err*] (apply println xs)) (System/exit 1))
+(defn- log! [& xs] (binding [*out* *err*] (apply println xs)))
+
+(def ^:private home (System/getProperty "user.home"))
+(def ^:private beagle-home   (or (System/getenv "BEAGLE_HOME") (str home "/code/beagle")))
+(def ^:private roundtrip-rkt (or (System/getenv "FRAM_ROUNDTRIP")
+                                 (str beagle-home "/beagle-lib/private/claims-roundtrip.rkt")))
+
+;; --- args --------------------------------------------------------------------
+(defn- parse-args [args]
+  (loop [a args, opts {:srcs [] :out nil :module nil :append false}]
+    (cond
+      (empty? a) opts
+      (= "--out" (first a))    (recur (drop 2 a) (assoc opts :out (second a)))
+      (= "--module" (first a)) (recur (drop 2 a) (assoc opts :module (second a)))
+      (= "--append" (first a)) (recur (rest a) (assoc opts :append true))
+      :else                    (recur (rest a) (update opts :srcs conj (first a))))))
+
+(defn- bclj-files [path]
+  (let [f (io/file path)]
+    (cond
+      (and (.isFile f) (str/ends-with? path ".bclj")) [path]
+      (.isDirectory f) (->> (.listFiles f)
+                            (map #(.getPath ^java.io.File %))
+                            (filter #(str/ends-with? % ".bclj"))
+                            sort vec)
+      :else [])))
+
+;; module name from a .bclj path: the file's basename without extension. schema.bclj
+;; -> "schema". This is the @<module># prefix the resolver groups by (name->module).
+(defn- module-of [path] (-> path io/file .getName (str/replace #"\.bclj$" "")))
+
+;; --- emit-edn one module, parse to [s p o] triples ---------------------------
+;; emit-edn prints `@file <path>` then one `[s "pred" o]` per line. o is an INTEGER
+;; (a structural link to node `o`) or a STRING (a literal value). We re-key every id.
+(defn- emit-edn-triples [path]
+  (let [r (proc/sh {:out :string :err :string} "racket" roundtrip-rkt "--emit-edn" path)]
+    (when (not (zero? (:exit r)))
+      (die "emit-edn FAILED for" path "\n" (:err r)))
+    (->> (str/split-lines (:out r))
+         (keep (fn [line]
+                 (when (str/starts-with? line "[")
+                   (edn/read-string line))))
+         vec)))
+
+;; --- the flip's re-key: file-local int n -> "@<mod>#n" -----------------------
+(defn- nodename [module n] (str "@" module "#" n))
+
+;; one module's emit-edn -> flat-log claim maps (kept as data; :tx assigned later).
+;; Subject int s -> :l "@mod#s". Integer object o -> :r "@mod#o" (a LINK). String
+;; object -> :r the string (a LITERAL). Predicate passes through verbatim.
+;; PLUS one bookkeeping claim @<mod>#root file "<path>" so render-from-log knows the
+;; source path (the @file wrapper analogue; "root" never collides with an int id).
+(defn- module->claims [path]
+  (let [module (module-of path)
+        triples (emit-edn-triples path)
+        node-claims
+        (mapv (fn [[s p o]]
+                {:op "assert"
+                 :l (nodename module s)
+                 :p (str p)
+                 :r (if (integer? o) (nodename module o) (str o))})
+              triples)]
+    (into [{:op "assert" :l (str "@" module "#root") :p "file" :r path}]
+          node-claims)))
+
+;; --- main --------------------------------------------------------------------
+(let [{:keys [srcs out module append]} (parse-args *command-line-args*)
+      out-path (or out (str (System/getProperty "user.dir") "/.fram/code.log"))]
+  (when (empty? srcs) (die "usage: bin/fram-ingest-code <src> [<src>...] [--out <log>] [--module <name>] [--append]"))
+  (when-not (.exists (io/file roundtrip-rkt))
+    (die "missing claims-roundtrip.rkt at" roundtrip-rkt "(set FRAM_ROUNDTRIP / BEAGLE_HOME)"))
+  (let [files (->> srcs (mapcat bclj-files) distinct sort
+                   (filter (fn [p] (or (nil? module) (str/includes? p module)))))]
+    (when (empty? files) (die "no .bclj modules matched" (pr-str srcs) (when module (str "(module filter: " module ")"))))
+    (log! "fram-ingest-code: folding" (count files) "module(s) ->" out-path
+          (when module (str "(module filter: " module ")")))
+    (let [all-claims (mapcat module->claims files)
+          ;; monotone :tx across the whole log; existing daemon seeds :next-seq to max.
+          base (if (and append (.exists (io/file out-path)))
+                 (->> (str/split-lines (slurp out-path))
+                      (remove str/blank?)
+                      (keep #(try (:tx (edn/read-string %)) (catch Exception _ nil)))
+                      (reduce max 0))
+                 0)
+          ts (str (java.time.Instant/now))
+          lines (map-indexed
+                 (fn [i c]
+                   (pr-str {:tx (+ base i 1) :op (:op c) :l (:l c) :p (:p c) :r (:r c)
+                            :ts ts :by "coord"}))
+                 all-claims)
+          body (str (str/join "\n" lines) "\n")]
+      (.mkdirs (.getParentFile (io/file out-path)))
+      (if append
+        (spit out-path body :append true)
+        (spit out-path body))
+      (log! "fram-ingest-code: wrote" (count all-claims) "AST claims"
+            (str "(" (count files) " module(s); ids re-keyed @<mod>#<n>)"))
+      (doseq [f files] (log! "  +" (module-of f) "<-" f))
+      (log! "DONE — the .bclj is now downstream of" out-path))))

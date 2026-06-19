@@ -97,9 +97,53 @@
        (filter #(str/ends-with? % ".bclj"))
        sort vec))
 
+;; shell helper (used by the flip helpers below + route-edit).
+(defn- sh [opts & args] (apply proc/sh opts args))
+
+;; ============================================================================
+;; THE FLIP — source-of-truth demotion for CODE (staged; OFF by default).
+;; ============================================================================
+;; When FRAM_FLIP=1 AND a CODE coordinator is reachable (FRAM_CODE_PORT, serving
+;; .fram/code.log), the PASS arm below does NOT io/copy-overwrite the .bclj. Instead
+;; it COMMITS the AST claim delta of the edited module THROUGH the coordinator
+;; (bin/fram-commit-code: single-(te,p,r) :assert/:retract at base version), THEN
+;; renders the .bclj FROM the updated log (bin/fram-render-code). The log is the
+;; source; the .bclj is downstream. With FRAM_FLIP unset, the legacy io/copy path is
+;; used verbatim (conservative default — the flip is proven on schema.bclj only).
+;; (See experiments/flip/DESIGN.md §4 + cnf_code_flip_test.clj.)
+(def ^:private flip-on?      (= "1" (System/getenv "FRAM_FLIP")))
+(def ^:private flip-bin-dir  (env-or "FRAM_BIN" (str (System/getProperty "user.dir") "/bin")))
+(def ^:private flip-code-port (System/getenv "FRAM_CODE_PORT"))
+;; the code log render-from-log reads — MUST be the same log the code coordinator on
+;; FRAM_CODE_PORT serves (else render would read a stale/other log). Default matches
+;; bin/fram-render-code's default ($PWD/.fram/code.log); set explicitly under a
+;; hermetic corpus (the test) so render reads the corpus's log, not the repo's.
+(def ^:private flip-code-log (System/getenv "FRAM_CODE_LOG"))
+
+;; module NAME from a target .bclj path (basename minus .bclj) — the @<mod># prefix.
+(defn- flip-module-of [path] (-> path io/file .getName (str/replace #"\.bclj$" "")))
+
+;; commit the regenerated module's AST delta to the code log via the coordinator,
+;; then render the .bclj from the log. Returns {:text ...} on success, {:isError ..}
+;; on any failure (commit rejected or render/recompile failed). Fail-closed.
+(defn- flip-commit-and-render! [regen-bclj module target-bclj]
+  (let [commit (sh {:out :string :err :string}
+                   "bb" "-cp" fram-out (str flip-bin-dir "/fram-commit-code")
+                   module regen-bclj "--port" (str flip-code-port))]
+    (if (not (zero? (:exit commit)))
+      {:isError true :text (str "FLIP REJECTED — delta-commit to the code log failed (no .bclj written):\n"
+                                (str/trim (str (:out commit) (:err commit))))}
+      (let [render (apply sh {:out (io/file target-bclj) :err :string}
+                          "bb" "-cp" fram-out (str flip-bin-dir "/fram-render-code") module
+                          (if flip-code-log ["--log" flip-code-log] []))]
+        (if (not (zero? (:exit render)))
+          {:isError true :text (str "FLIP — delta committed but render-from-log FAILED:\n" (str/trim (:err render)))}
+          {:text (str "committed (FLIP): " module
+                      " — AST delta committed to the code log via the coordinator; "
+                      ".bclj re-rendered FROM the log (pure function of the log)")})))))
+
 ;; the corpus the verb operates over = every .bclj in the source tree (so cross-module
 ;; references resolve), with the per-file projected EDN written next to it in a temp dir.
-(defn- sh [opts & args] (apply proc/sh opts args))
 
 (defn route-edit [e]
   (let [op (:op e) module (:module e)
@@ -163,13 +207,29 @@
                       (let [bg (sh {:out :string :err :string} build-all regen "--out" odir)
                             built (str (:out bg) (:err bg))]
                         (if (str/includes? built "0 error")
-                          ;; PASS — commit: overwrite the source .bclj(s) with the regenerated text.
+                          ;; PASS — commit. Two paths, selected by FRAM_FLIP:
                           (let [tf (first targets)
                                 tb (.getName (io/file tf))]
-                            (io/copy (io/file (str regen "/" tb)) (io/file tf))
-                            (sh {} "rm" "-rf" work)
-                            {:text (str "committed: " op " on " tb
-                                        " (claim op, recompiled, byte-stable text regenerated)")})
+                            (cond
+                              ;; FLIP path (FRAM_FLIP=1): the LOG is canonical. Commit the
+                              ;; AST claim delta THROUGH the coordinator, then render the
+                              ;; .bclj FROM the log. The .bclj is downstream of the log.
+                              (and flip-on? flip-code-port)
+                              (let [res (flip-commit-and-render!
+                                         (str regen "/" tb) (flip-module-of tf) tf)]
+                                (sh {} "rm" "-rf" work) res)
+                              ;; FRAM_FLIP=1 but no code coordinator configured: fail loud
+                              ;; rather than silently fall back to the text-canonical path.
+                              flip-on?
+                              (do (sh {} "rm" "-rf" work)
+                                  {:isError true :text "FRAM_FLIP=1 but FRAM_CODE_PORT is unset — refusing to fall back to io/copy (set the code coordinator port or unset FRAM_FLIP)"})
+                              ;; LEGACY path (default): overwrite the source .bclj with the
+                              ;; regenerated text (text-canonical; the flip is not enabled).
+                              :else
+                              (do (io/copy (io/file (str regen "/" tb)) (io/file tf))
+                                  (sh {} "rm" "-rf" work)
+                                  {:text (str "committed: " op " on " tb
+                                              " (claim op, recompiled, byte-stable text regenerated)")})))
                           ;; FAIL — does not recompile; mutate nothing, return the diagnostic.
                           (do (sh {} "rm" "-rf" work)
                               {:isError true :text (str "REJECTED — regenerated module does not recompile (no source written):\n"

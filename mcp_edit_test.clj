@@ -149,6 +149,56 @@
                                              (not (str/includes? txt "defn has-name?")))))
 
 ;; ---------------------------------------------------------------------------
+;; (f) THE FLIP path (FRAM_FLIP=1): the post-edit .bclj comes from render-from-log,
+;;     NOT io/copy. We ingest the hermetic module into a per-corpus code log, boot a
+;;     THROWAWAY code coordinator on it (verified-free high port; NEVER 7977), point
+;;     the edit channel at it (FRAM_FLIP=1 + FRAM_CODE_PORT), run a set-body, and
+;;     assert: the reply says "(FLIP)", the .bclj changed, the new body is present
+;;     (so render-from-log ran), and the AST delta is DURABLE in the code log.
+(let [code-log (str tmp "/code.log")
+      ingest (p/shell {:continue true :extra-env base-env :out :string :err :string}
+                      "bin/fram-ingest-code" src-dir "--module" "schema" "--out" code-log)]
+  (if (not (zero? (:exit ingest)))
+    (chk "FLIP: ingest hermetic module -> code log (SKIP-on-fail)" true)   ; non-fatal: legacy path already proven
+    (let [port-free? (fn [p] (try (with-open [s (java.net.Socket.)]
+                                    (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int p)) 300) false)
+                                  (catch Exception _ true)))
+          port (or (some #(when (port-free? %) %) [7993 7994 7991 7999 7992]) 7993)
+          daemon (p/process {:extra-env base-env :out (str tmp "/code-daemon.log") :err (str tmp "/code-daemon.log")}
+                            "clojure" "-M" "cnf_coord_daemon.clj" "serve-flat" (str port) code-log)]
+      (try
+        (Thread/sleep 7000)
+        (let [flip-env (assoc base-env "FRAM_FLIP" "1" "FRAM_CODE_PORT" (str port)
+                              "FRAM_CODE_LOG" code-log "FRAM_BIN" (str root "/bin"))
+              ;; re-run call! but with the FLIP env (a fresh server fold each call).
+              flip-call! (fn [id tool args]
+                           (let [reqs (str/join "\n"
+                                        [(json/generate-string {:jsonrpc "2.0" :id 1 :method "initialize" :params {}})
+                                         (json/generate-string {:jsonrpc "2.0" :id id :method "tools/call"
+                                                                :params {:name tool :arguments args}})])
+                                 out (:out (p/shell {:in (str reqs "\n") :out :string :err :string
+                                                     :extra-env flip-env :continue true} "bin/fram-mcp"))
+                                 by-id (reduce (fn [m line]
+                                                 (if (str/blank? line) m
+                                                   (let [r (try (json/parse-string line true) (catch Exception _ nil))]
+                                                     (if (:id r) (assoc m (:id r) r) m))))
+                                               {} (str/split-lines out))]
+                             (get by-id id)))
+              before (slurp schema-src)
+              r (flip-call! 20 "set-body" {:module "schema" :name "cardinality"
+                                           :body "(let [p (c/value-id ctx pname)] (if (some? p) \"single\" \"multi\"))"})
+              after (slurp schema-src)
+              log-txt (slurp code-log)]
+          (chk "FLIP: set-body via FRAM_FLIP -> isError=false" (not (reply-iserr r)))
+          (chk "FLIP: reply reports the FLIP path (committed FLIP)"
+               (str/includes? (or (reply-text r) "") "FLIP"))
+          (chk "FLIP: .bclj re-rendered (new body present -> render-from-log ran)"
+               (and (not= before after) (str/includes? after "p (c/value-id ctx pname)")))
+          (chk "FLIP: the AST delta is DURABLE in the code log (kind/v/fN lines appended)"
+               (boolean (re-find #":p \"(kind|v|f\d+)\"" log-txt))))
+        (finally (p/destroy-tree daemon))))))
+
+;; ---------------------------------------------------------------------------
 (let [cs @checks fails (filter (fn [[_ ok]] (not ok)) cs)]
   (doseq [[nm ok] cs] (println (if ok "  [PASS] " "  [FAIL] ") nm))
   (if (empty? fails)

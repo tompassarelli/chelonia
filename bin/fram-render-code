@@ -1,0 +1,120 @@
+#!/usr/bin/env bb
+;; ============================================================================
+;; fram-render-code — THE FLIP, stage 2: canonical CODE log -> .bclj (a VIEW).
+;; ============================================================================
+;; The .bclj is a PURE FUNCTION of the claim log. This boots the reified store
+;; over .fram/code.log (the SAME migrate-flat->co the daemon uses — IN-PROCESS,
+;; no socket; a pure render needs no coordinator), materializes refers_to over the
+;; warm store (so references render via identity), projects the module's claims to
+;; resolved EDN via resolve.clj extract-file!, and `racket --render`s the .bclj.
+;;
+;; USAGE:
+;;   bin/fram-render-code <module> [--log <code.log>] [--out <file.bclj>]
+;;     <module>  module NAME (e.g. schema) — the @<module># node prefix.
+;;     --log     default $PWD/.fram/code.log
+;;     --out     default: STDOUT (so callers can `cmp -s <(bin/fram-render-code schema) src/fram/schema.bclj`)
+;;
+;; NORMALIZATION (the Keystone's documented "modulo"): the renderer is the SAME
+;; normalizing pretty-printer the existing text-canonical authoring path uses
+;; (fram_mcp.clj route-edit -> racket --render). It is NOT a byte-preserving copier:
+;; it canonicalizes `#lang beagle/clj` to the leading `(define-target clj)` form and
+;; reflows comment whitespace. Therefore byte-identity is asserted against
+;; render(TEXT-path), not against the hand-committed bytes — i.e. the keystone gate
+;; proves render(log) == render(text), so the .bclj is a pure function of the log
+;; over the SAME projection the authoring edge already trusts. (See DESIGN.md §3.)
+;;
+;; Env: BEAGLE_HOME, FRAM_ROUNDTRIP, FRAM_RESOLVE, FRAM_OUT (out/ classpath dir).
+;; ============================================================================
+(require '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[clojure.edn :as edn]
+         '[babashka.process :as proc]
+         '[fram.cnf :as c]
+         '[fram.schema :as s])
+
+(defn- die [& xs] (binding [*out* *err*] (apply println xs)) (System/exit 1))
+(defn- log! [& xs] (binding [*out* *err*] (apply println xs)))
+
+(def ^:private home (System/getProperty "user.home"))
+(def ^:private beagle-home   (or (System/getenv "BEAGLE_HOME") (str home "/code/beagle")))
+(def ^:private roundtrip-rkt (or (System/getenv "FRAM_ROUNDTRIP")
+                                 (str beagle-home "/beagle-lib/private/claims-roundtrip.rkt")))
+(def ^:private resolve-clj   (or (System/getenv "FRAM_RESOLVE")
+                                 (str (System/getProperty "user.dir") "/chartroom/src/resolve.clj")))
+
+(load-file "cnf_coord_daemon.clj")          ; migrate-flat->co + the warm-store machinery
+(load-file resolve-clj)                       ; extract-file! / resolve-warm-store! / out-path
+
+(defn- parse-args [args]
+  (loop [a (rest args), opts {:module (first args) :log nil :out nil}]
+    (cond
+      (empty? a) opts
+      (= "--log" (first a)) (recur (drop 2 a) (assoc opts :log (second a)))
+      (= "--out" (first a)) (recur (drop 2 a) (assoc opts :out (second a)))
+      :else (recur (rest a) opts))))
+
+(let [{:keys [module log out]} (parse-args *command-line-args*)
+      log-path (or log (str (System/getProperty "user.dir") "/.fram/code.log"))]
+  (when (str/blank? module) (die "usage: bin/fram-render-code <module> [--log <code.log>] [--out <file.bclj>]"))
+  (when-not (.exists (io/file log-path)) (die "no code log at" log-path "(run bin/fram-ingest-code first)"))
+  (when-not (.exists (io/file roundtrip-rkt)) (die "missing claims-roundtrip.rkt at" roundtrip-rkt))
+
+  ;; 1. boot the reified store over the code log (IN-PROCESS migrate-flat->co).
+  (let [coord (migrate-flat->co log-path)
+        st    (:store coord)
+        ;; the module's source path from the @<mod>#root file claim (the @file analogue).
+        root-id (s/resolve-name st (str "@" module "#root"))
+        file-pred (c/value-id st "file")
+        src-path (when (and root-id file-pred)
+                   (let [cs (c/by-lp st root-id file-pred)]
+                     (when (seq cs) (c/literal st (:r (c/claim-of st (first cs)))))))]
+    (when-not src-path
+      (die "module" module "has no @" module "#root file claim in" log-path
+           "(was it ingested?)"))
+
+    ;; 2. materialize refers_to over the warm store (resolver writes refers_to for
+    ;;    every module; the renderer needs it to spell references by identity).
+    (resolve/resolve-warm-store! st)
+
+    ;; 3. project the module's claims -> resolved EDN via extract-file!. resolve.clj's
+    ;;    corpus is keyed by the `src` string corpus-from-store! set (= module name).
+    ;;    Re-bind the read accessors + corpus over the warm store, then extract-file!
+    ;;    the module's src. (resolve-warm-store! already ran the walk + bound nothing
+    ;;    persistent; we open a fresh read binding to call extract-file! cleanly.)
+    (let [resolve-out (or (System/getenv "RESOLVE_OUT")
+                          (str (System/getProperty "java.io.tmpdir") "/fram-render-" (System/nanoTime)))
+          _ (.mkdirs (io/file resolve-out))
+          edn-out (str resolve-out "/resolved-" module ".bclj.edn")]
+      ;; bind ctx + value-ids + corpus over the warm store (read-only; no walk), then
+      ;; extract-file! the module. corpus-from-store! sets `srcs` keyed by module name,
+      ;; so `src` for extract-file! is the module name string.
+      (binding [resolve/ctx st
+                resolve/tx (c/begin-tx! st "render-read")
+                resolve/Vp     (c/value-id st "v")
+                resolve/KIND   (c/value-id st "kind")
+                resolve/REFERS (c/value-id st "refers_to")
+                resolve/FIXED  (c/value-id st "keep_spelling")
+                resolve/QUAL   (c/value-id st "qualifier")
+                resolve/CTOR   (c/value-id st "ctor_prefix")
+                resolve/ACC    (c/value-id st "accessor_field")
+                resolve/file->ents (atom {})
+                resolve/srcs [] resolve/file-modframe {} resolve/file-typeframe {}
+                resolve/file-accessors {} resolve/global-exports {}
+                resolve/global-type-exports {} resolve/global-accessor-exports {}]
+        (resolve/corpus-from-store!)
+        (let [the-src (some #(when (= module %) %) resolve/srcs)]
+          (when-not the-src
+            (die "module" module "not found in warm corpus; srcs=" (pr-str resolve/srcs)))
+          ;; extract-file! emits `@file <src>` as the wrapper header line. The renderer
+          ;; reads the @file line but the leading token is normalized by --render anyway.
+          (resolve/extract-file! the-src edn-out)))
+
+      ;; 4. racket --render the resolved EDN -> .bclj text.
+      (let [r (proc/sh {:out :string :err :string} "racket" roundtrip-rkt "--render" edn-out)]
+        (when (not (zero? (:exit r))) (die "render FAILED for" module "\n" (:err r)))
+        (if out
+          (do (spit out (:out r))
+              (log! "fram-render-code: rendered" module "->" out
+                    (str "(" (count (:out r)) " bytes; pure function of " log-path ")")))
+          (print (:out r)))
+        (flush)))))

@@ -1,0 +1,197 @@
+#!/usr/bin/env bb
+;; ============================================================================
+;; fram-commit-code — THE FLIP, stage 3: COMMIT the AST claim delta to the log
+;;                    THROUGH the coordinator (then the .bclj is re-rendered).
+;; ============================================================================
+;; This is the HEART of the flip. Today fram_mcp.clj route-edit ends by io/copy-
+;; OVERWRITING the .bclj and commits NOTHING. This commits the AST claim DELTA of
+;; an edited module into the canonical CODE log via the coordinator's single-
+;; (te,p,r) :assert/:retract wire — so the log is the source and the .bclj is
+;; downstream.
+;;
+;; INPUT: the NEW rendered .bclj for ONE module (the verb's recompile-gated output)
+;; and the module name. We:
+;;   1. emit-edn the NEW .bclj, re-key file-local ids to @<mod>#n (the SAME mapping
+;;      bin/fram-ingest-code uses) -> POST claim-triple set.
+;;   2. read the module's CURRENT @<mod>#* AST claim-triples off the coordinator
+;;      (via :query over the warm store) -> PRE claim-triple set.
+;;   3. delta = (adds = POST\PRE) ++ (removes = PRE\POST).
+;;   4. commit through the coordinator at base version, retrying on :conflict
+;;      (mirrors fram_mcp.clj route-write): retract removes FIRST (supersede old
+;;      body fN edges — multi-valued asserts append, so the old edge MUST be
+;;      explicitly retracted), then assert adds (new subtree leaves before the
+;;      parent re-point; auto-named via ent!).
+;;
+;; AST asserts are MULTI-valued (kind/v/fN not in fram.kernel/single-valued), so an
+;; identical re-assert idempotently no-ops and ordering of independent asserts is
+;; commutative. The retract-then-assert pair is the coordinator analogue of
+;; resolve.clj retire-claim! + mint/wire. (See DESIGN.md §4.)
+;;
+;; USAGE:
+;;   bin/fram-commit-code <module> <new.bclj> --port <P> [--dry-run]
+;;     --port    REQUIRED — the coordinator port serving the CODE log.
+;;     --dry-run print the delta (#adds / #removes) and commit NOTHING.
+;;
+;; SAFETY: the caller MUST point --port at a coordinator booted on the CODE log
+;; (.fram/code.log) — NEVER the live lodestar coordinator. This script asserts the
+;; coordinator's :status :log basename is a code log before committing.
+;;
+;; Env: BEAGLE_HOME, FRAM_ROUNDTRIP.
+;; ============================================================================
+(require '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[clojure.edn :as edn]
+         '[clojure.set :as set]
+         '[babashka.process :as proc]
+         '[fram.rt])
+
+(defn- die [& xs] (binding [*out* *err*] (apply println xs)) (System/exit 1))
+(defn- log! [& xs] (binding [*out* *err*] (apply println xs)))
+
+(def ^:private home (System/getProperty "user.home"))
+(def ^:private beagle-home   (or (System/getenv "BEAGLE_HOME") (str home "/code/beagle")))
+(def ^:private roundtrip-rkt (or (System/getenv "FRAM_ROUNDTRIP")
+                                 (str beagle-home "/beagle-lib/private/claims-roundtrip.rkt")))
+
+(defn- parse-args [args]
+  (loop [a (drop 2 args), opts {:module (first args) :bclj (second args) :port nil :dry false}]
+    (cond
+      (empty? a) opts
+      (= "--port" (first a)) (recur (drop 2 a) (assoc opts :port (Integer/parseInt (second a))))
+      (= "--dry-run" (first a)) (recur (rest a) (assoc opts :dry true))
+      :else (recur (rest a) opts))))
+
+(defn- nodename [module n] (str "@" module "#" n))
+
+;; emit-edn the NEW .bclj -> the POST claim-triple set [l p r], re-keyed @<mod>#n.
+;; Identical mapping to bin/fram-ingest-code (subject int -> name; int object ->
+;; @mod#o link; string object -> literal). Plus the @<mod>#root file claim.
+(defn- bclj->triples [module path]
+  (let [r (proc/sh {:out :string :err :string} "racket" roundtrip-rkt "--emit-edn" path)]
+    (when (not (zero? (:exit r))) (die "emit-edn FAILED:\n" (:err r)))
+    (into #{[(str "@" module "#root") "file" path]}
+          (->> (str/split-lines (:out r))
+               (keep (fn [line]
+                       (when (str/starts-with? line "[")
+                         (let [[s p o] (edn/read-string line)]
+                           [(nodename module s) (str p)
+                            (if (integer? o) (nodename module o) (str o))]))))))))
+
+;; the module's CURRENT @<mod>#* AST claim-triples, read off the coordinator's warm
+;; store via :query (a Datalog triple scan). The query returns [l p r] rows for
+;; every claim whose subject begins "@<mod>#". refers_to/render markers are filtered
+;; out of :query by the daemon (claim->triple), so this is the raw AST exactly.
+(defn- coord-rt [port req]
+  (with-open [s (java.net.Socket.)]
+    (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int port)) 2000)
+    (let [w (io/writer (.getOutputStream s)) rd (io/reader (.getInputStream s))]
+      (.write w (str (pr-str req) "\n")) (.flush w)
+      (edn/read-string (.readLine rd)))))
+
+(defn- coord-status [port] (coord-rt port {:op :status}))
+(defn- coord-version [port] (:version (coord-rt port {:op :version})))
+
+;; pull every AST triple for the module via :query: triple(l p r) with l bound by a
+;; module-prefix test is not expressible directly, so we scan all triples and filter
+;; in-process. The :query base relation `triple` yields [l p r] rows.
+(defn- pre-triples [port module]
+  (let [q {:find "out"
+           :rules [{:head {:rel "out" :args [{:var "l"} {:var "p"} {:var "r"}]}
+                    :body [{:rel "triple" :args [{:var "l"} {:var "p"} {:var "r"}]}]}]}
+        resp (coord-rt port {:op :query :query q :scan true})
+        rows (:ok resp)]
+    (when (:error resp) (die "coord :query failed:" (pr-str (:error resp))))
+    (into #{} (->> rows
+                   (map (fn [row] (mapv str row)))
+                   (filter (fn [[l _ _]] (str/starts-with? l (str "@" module "#"))))))))
+
+(defn- ref? [r] (and (string? r) (str/starts-with? r "@")))
+
+;; the structural AST predicates an edit may touch — leaves (kind/v), comment-node
+;; attributes (style/placement), and the slot edges (fN/segN/commentN/tail/child).
+;; This is EVERY predicate `racket --emit-edn` emits (verified against the corpus); a
+;; code delta NEVER touches a non-AST predicate (e.g. a relates_to bridge claim on a
+;; code node, or the @<mod>#root file claim) — those are domain/bookkeeping, not the
+;; module's structure, so they are excluded from BOTH the pre and post sets. (DESIGN §4.1)
+;; OMITTING any emit-edn pred here drops it on the whole-node re-commit and corrupts the
+;; node (e.g. a comment without "placement" makes --render throw) — so this set must stay
+;; the COMPLETE emit-edn vocabulary.
+(defn- ast-pred? [p]
+  (or (#{"kind" "v" "child" "tail" "style" "placement"} p)
+      (boolean (re-matches #"(f|seg|comment)\d+" p))))
+
+;; commit one op (:assert|:retract) at base v, retry on :conflict (route-write loop).
+;; op is a KEYWORD — the daemon's handle dispatches on (:op req) as a keyword.
+(defn- commit-op! [port op te p r]
+  (loop [tries 5]
+    (let [v (coord-version port)
+          resp (coord-rt port {:op op :te te :p p :r r :base v :frame "flip-commit"})]
+      (cond
+        (:ok resp) :ok
+        (and (= (:reject resp) :conflict) (pos? tries)) (recur (dec tries))
+        :else (die "coordinator REJECTED" op te p r "->" (pr-str resp))))))
+
+(let [{:keys [module bclj port dry]} (parse-args *command-line-args*)]
+  (when (or (str/blank? module) (str/blank? bclj)) (die "usage: bin/fram-commit-code <module> <new.bclj> --port <P> [--dry-run]"))
+  (when (nil? port) (die "--port <P> is REQUIRED (the coordinator serving the CODE log)"))
+  (when-not (.exists (io/file bclj)) (die "no such .bclj:" bclj))
+
+  ;; SAFETY GATE: refuse to commit unless the coordinator is serving a CODE log.
+  (let [st (coord-status port)
+        logp (str (:log st))]
+    (when (str/blank? logp) (die "coordinator on" port "reports no :log — refusing to commit"))
+    (when-not (str/includes? logp "code.log")
+      (die "SAFETY: coordinator on" port "serves" logp
+           "— NOT a *code.log; refusing (never commit code to a thread/lodestar log)"))
+    (log! "fram-commit-code: target coordinator" (str "127.0.0.1:" port) "log=" logp))
+
+  (let [post (bclj->triples module bclj)
+        pre  (pre-triples port module)
+        ;; restrict to AST predicates: the @<mod>#root file claim and any domain claim
+        ;; (e.g. a relates_to bridge) on a code node are NOT module structure and must
+        ;; never be churned by a code edit.
+        ast-only (fn [s] (set (filter (fn [[_ p _]] (ast-pred? p)) s)))
+        post* (ast-only post) pre* (ast-only pre)
+        ;; WHOLE-MODULE RE-COMMIT (clean slate), NOT an id-keyed set-difference.
+        ;; emit-edn assigns node ids by deterministic traversal, so a NON-trivial edit
+        ;; RENUMBERS nodes after the edit point. A set-difference by re-keyed id then
+        ;; leaves coincidentally-shared ids (e.g. @schema#100 is a DIFFERENT node pre vs
+        ;; post) carrying a MIX of old + new claims -> a corrupt AST. The robust commit
+        ;; is total: retract EVERY current @<mod>#* AST claim, then assert the FULL new
+        ;; emit-edn. Postcondition is exactly `live AST == post`, regardless of id
+        ;; alignment. (Multi-valued AST asserts are idempotent, so re-asserting the
+        ;; unchanged majority is free; the clean-slate retract is what guarantees no
+        ;; stale edge survives. DESIGN §4.1 risk #2 — partial/tangled delta — is closed
+        ;; by totality + leaves-then-reparent ordering on the assert side.)
+        ;; idempotent shortcut: a claim in BOTH pre and post need not be retracted then
+        ;; re-asserted (it would no-op), so we only retract pre\post and assert post\pre
+        ;; ... EXCEPT that, as above, shared-id-different-node is the trap. So we retract
+        ;; ALL pre AST claims whose NODE appears in `changed` (any node touched on either
+        ;; side), and assert ALL post AST claims for those nodes. Nodes identical on both
+        ;; sides (same id, same full claim set) are left untouched.
+        pre-by-node  (group-by first pre*)
+        post-by-node (group-by first post*)
+        all-nodes (into (set (keys pre-by-node)) (keys post-by-node))
+        changed-nodes (set (filter (fn [n] (not= (set (get pre-by-node n))
+                                                 (set (get post-by-node n))))
+                                   all-nodes))
+        removes (filter (fn [[n _ _]] (changed-nodes n)) pre*)
+        adds    (filter (fn [[n _ _]] (changed-nodes n)) post*)]
+    (log! "fram-commit-code:" module "whole-node re-commit —"
+          (count changed-nodes) "changed node(s):" (count adds) "assert(s),"
+          (count removes) "retract(s)"
+          (str "(pre=" (count pre*) " post=" (count post*) " AST claims)"))
+    (if dry
+      (do (log! "  [dry-run] changed nodes (first 12):" (pr-str (take 12 changed-nodes)))
+          (log! "  [dry-run] committed NOTHING"))
+      (do
+        ;; 1. retract EVERY claim on a changed node (clean slate for those nodes).
+        (doseq [[te p r] removes] (commit-op! port :retract te p r))
+        ;; 2. assert the new claims for those nodes. Order leaves/v before parent fN
+        ;;    re-points: sort so kind/v come first, then fN/seg/comment/tail edges, so a
+        ;;    referenced child node exists (has its kind) before a parent points at it.
+        (let [leaf? (fn [[_ p _]] (#{"kind" "v"} p))
+              ordered (concat (filter leaf? adds) (remove leaf? adds))]
+          (doseq [[te p r] ordered] (commit-op! port :assert te p r)))
+        (log! "fram-commit-code: COMMITTED" (count removes) "retract(s) +" (count adds)
+              "assert(s) across" (count changed-nodes) "node(s) (now render-from-log to refresh the .bclj)")))))

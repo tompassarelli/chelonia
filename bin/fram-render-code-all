@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# ============================================================================
+# fram-render-code-all — THE FLIP build step (GENERATED-MARKER regeneration).
+# ============================================================================
+# Regenerate the .bclj of every CLAIM-CANONICAL (sentinel'd) module FROM the code
+# log — the build step that keeps the generated .bclj in sync with its canonical
+# source (the claim log). A module is claim-canonical iff its src/.bclj carries the
+# `;; @claim-canonical` sentinel. For each such module it runs bin/fram-render-code
+# and writes the result back to src/fram/<module>.bclj.
+#
+# In THIS experiment only schema.bclj carries the sentinel, so this regenerates
+# schema only. It is byte-identical to the committed source's render projection
+# (the KEYSTONE gate proves render(log) == render(text)), so re-running it on a
+# clean tree leaves src/fram/schema.bclj's RENDER unchanged.
+#
+# IMPORTANT: render normalizes #lang beagle/clj -> (define-target clj). The committed
+# src/fram/schema.bclj still carries #lang (it predates full adoption), so a naive
+# overwrite would change those bytes. To stay NON-DESTRUCTIVE this script is DRY-RUN
+# by default (prints what WOULD change); pass --write to actually overwrite (a human
+# land decision, gated by the KEYSTONE byte-identity check below).
+#
+#   bin/fram-render-code-all [--log <code.log>] [--write]
+# ============================================================================
+set -uo pipefail
+FRAM="$(cd "$(dirname "$0")/.." && pwd)"; cd "$FRAM"
+export BEAGLE_HOME="${BEAGLE_HOME:-$HOME/code/beagle}"
+export FRAM_OUT="$FRAM/out"
+LOG="$FRAM/.fram/code.log"; WRITE=0
+while [ $# -gt 0 ]; do case "$1" in
+  --log) LOG="$2"; shift 2;; --write) WRITE=1; shift;; *) shift;; esac; done
+
+[ -f "$LOG" ] || { echo "no code log at $LOG (run bin/fram-ingest-code first)"; exit 1; }
+
+changed=0
+for f in src/fram/*.bclj; do
+  grep -q '@claim-canonical' "$f" || continue            # adopted modules only
+  m="$(basename "$f" .bclj)"
+  tmp="$(mktemp)"
+  if ! bb -cp out bin/fram-render-code "$m" --log "$LOG" --out "$tmp" 2>/tmp/render-all.err; then
+    echo "  RENDER FAILED for $m:"; cat /tmp/render-all.err; rm -f "$tmp"; continue
+  fi
+  if cmp -s "$tmp" "$f"; then
+    echo "  $m: render(log) == committed bytes (no change)"
+  else
+    changed=$((changed+1))
+    if [ "$WRITE" -eq 1 ]; then
+      cp "$tmp" "$f"; echo "  $m: REGENERATED from the log (overwrote src/fram/$m.bclj)"
+    else
+      echo "  $m: render(log) DIFFERS from committed bytes ($(wc -c < "$tmp") vs $(wc -c < "$f") bytes; mostly #lang/comment normalization) — DRY RUN, not written (use --write)"
+    fi
+  fi
+  rm -f "$tmp"
+done
+echo "fram-render-code-all: $changed module(s) would change ($([ "$WRITE" -eq 1 ] && echo written || echo dry-run))"
