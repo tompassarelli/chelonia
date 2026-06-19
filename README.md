@@ -23,6 +23,13 @@ you don't maintain them.
 > there) — the primitive is. The full argument, written to survive a skeptic and
 > with the negative space conceded, is in **[docs/WHY_FRAM_EXISTS.md](docs/WHY_FRAM_EXISTS.md)**.
 
+> **The write/read model** — why many agents can author one graph without clobbering
+> each other — is in its companion **[docs/VIEWS_AND_BRANCHES.md](docs/VIEWS_AND_BRANCHES.md)**:
+> the graph is append-only and *plural* (it stores **claims**, not facts), writes don't
+> conflict (only *read-time* path-selection does), a program is a coherent **traversal
+> under a view**, and conflict is the shadow of a cardinality axiom — identity the only
+> forced one. (Part design-direction: it flags what's shipped vs. where the model is heading.)
+
 ## One engine, many consumers
 
 Fram is the **engine**, not an app. The relational structure is shared, so the
@@ -32,9 +39,13 @@ Fram is the **engine**, not an app. The relational structure is shared, so the
 - **[Lodestar](https://github.com/tompassarelli/lodestar)** — life/work
   coordination. The lifecycle rules and the daily verbs (`ready` / `blocked` /
   `leverage` / `next` / `capture`) live there, derived from the claims.
-- **Chartroom** — code-as-claims. It projects a source tree's ASTs into a Fram
-  graph and derives **code intelligence** (scope-correct call graphs, transitive
-  blast radius) as Datalog queries.
+- **Chartroom** — code-as-claims, with the claim log **canonical**: a module's AST
+  *is* the claims, the `.bclj` source text is a rendered **view** of the log (a pure
+  function of it — verified byte-identical), and edits are authored **through the
+  graph** by minimal-op verbs (`set-body` / `upsert-form`) that commit a verb's
+  *exact* claim delta, not a whole-file rewrite — so disjoint edits to the same
+  module commute. On top it derives **code intelligence** — scope-correct call
+  graphs, transitive blast radius — as Datalog queries.
 
 The engine ships **no** domain verbs of its own. New domain → new graph (a
 separate log), same engine.
