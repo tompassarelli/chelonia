@@ -111,6 +111,12 @@
 (defn q-by-l [claims :- (Vec Claim) l :- String] :- (Vec Claim)
   (filterv (fn [c :- Claim] :- Bool (= (:l c) l)) claims))
 
+;; Fram is view-relative (docs/VIEWS_AND_BRANCHES.md): a (l,p) group MAY hold more than one
+;; live claim, and choosing one is a VIEW decision. `one` SELECTS the default-main member
+;; (policy = first live) of a possibly-multi group — it does NOT prove uniqueness. It is the
+;; honest single-selector (the `one`/`many` split names the selection rather than burying a
+;; bare `(first …)`); `many` returns the whole group. Mirrors resolve/select-main-1 — the
+;; same selection point in the resolver, named in #19 (the read-side honesty pass).
 (defn one [claims :- (Vec Claim) l :- String p :- String] :- String?
   (let [hits (q-lp claims l p)]
     (if (empty? hits) nil (:r (first hits)))))
