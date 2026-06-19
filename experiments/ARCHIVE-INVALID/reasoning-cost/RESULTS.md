@@ -1,3 +1,5 @@
+> ⛔ **ARCHIVED — INVALID FOR THE THESIS.** This tests warm-index-vs-text-grep on a graph DERIVED FROM TEXT (the graphify result), NOT the thesis (canonical graph as source of truth). Diagnostic value only. **DO NOT cite as evidence.** See `experiments/ARCHIVE-INVALID/INVALID.md` and `experiments/THESIS.md`.
+
 # Reasoning costs fewer retrievals when the structure is already in the graph
 
 Given the **same** structural task, an agent reaches the **same verified-correct

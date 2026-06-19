@@ -1,3 +1,5 @@
+> ⛔ **ARCHIVED — INVALID FOR THE THESIS.** This tests warm-index-vs-text-grep on a graph DERIVED FROM TEXT (the graphify result), NOT the thesis (canonical graph as source of truth). Diagnostic value only. **DO NOT cite as evidence.** See `experiments/ARCHIVE-INVALID/INVALID.md` and `experiments/THESIS.md`.
+
 # Tier-2 experiment SPEC — concurrent authoring through the claim graph
 
 > **Status:** SPEC + scenario only (no harness code yet). This file defines the two

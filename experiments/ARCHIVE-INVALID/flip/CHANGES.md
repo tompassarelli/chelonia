@@ -1,3 +1,5 @@
+> ⛔ **ARCHIVED — INVALID FOR THE THESIS.** This tests warm-index-vs-text-grep on a graph DERIVED FROM TEXT (the graphify result), NOT the thesis (canonical graph as source of truth). Diagnostic value only. **DO NOT cite as evidence.** See `experiments/ARCHIVE-INVALID/INVALID.md` and `experiments/THESIS.md`.
+
 # THE FLIP — CHANGES manifest (for the human main-loop to review + land)
 
 **Date:** 2026-06-19 · **Repo:** /home/tom/code/fram · **Branch:** `authoring-claim-ops`
