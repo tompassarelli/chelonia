@@ -2,7 +2,7 @@
   (:require [fram.cnf :as c]
             [fram.types :as t]))
 
-(defn v [^String name]
+(defn v [name]
   {:var name})
 
 (defn lit [^String rel args]
