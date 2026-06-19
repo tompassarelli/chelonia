@@ -23,14 +23,26 @@ The right shape:
 
 Git hard-codes a single tradeoff: *validate the joint state of a change set
 before exposing it*, with a *coarse* (whole-file/tree) gate, because text has no
-smaller unit of meaning. Fram makes that tradeoff **programmable**: it can occupy
-git's point (with a *finer, scoped* gate) **and** slide to points text cannot
-express (eager visibility, per-claim failure isolation, commuting edits).
+smaller unit of meaning. Fram makes that tradeoff **programmable** — but be exact
+about three tiers, or the pitch collapses them (the "headwind" failure mode, one
+level up):
 
-**One-line thesis:** *Git gives you one hard-coded tradeoff; Fram makes the
-tradeoff programmable.* Not "Fram is always better." The honest claim is
-**superset**: git's guarantees included (at a cheaper gate), plus modes git's
-substrate forbids.
+- **SHOWN (banked, measured):** Fram occupies points on the curve *past* git's —
+  the eager-visibility corner (RAW propagation ~0) and per-claim failure isolation.
+  Git's substrate forbids these.
+- **ARGUED (architectural, UNBUILT):** Fram can *also* sit at git's own point —
+  git-mode (stage → joint-validate → publish, with a view boundary where
+  speculative claims aren't visible to ordinary readers). Rests on staging+gating
+  being substrate-neutral — true, but **not demonstrated**. The view model is
+  *designed* (VIEWS_AND_BRANCHES); the mode is *unbuilt*.
+- **SEQUEL (a real build):** Fram sits at git's point *more cheaply* (scoped gate).
+  Probe-scoped (§7 Phase 0): YELLOW→RED, a build, not a measurement.
+
+**One-line thesis (talk-safe):** *Git gives you one hard-coded tradeoff; Fram is
+designed to make it programmable.* Today: **Fram reaches points git's substrate
+forbids — measured; it can in principle occupy git's point too — argued;
+undercutting git's own gate is named future work.** NOT "Fram is the whole curve,
+measured." Never collapse *shown* and *argued* into one word.
 
 ---
 
@@ -246,6 +258,50 @@ cleanly** — ask which of three it is, and refuse any framing that collapses th
 3. a **programmable choice for Fram** (a point on the curve — like eager visibility).
 
 "Git wins compute" collapsed (1) into (2). "Git wins nothing" denied (2). "Fram
-accepts incoherence" mistook a *choice* (3) for a *constraint*. The correct claim
-keeps all three distinct: git is a point; Fram is the curve; the curve passes
-through git's point at a cheaper gate.
+accepts incoherence" mistook a *choice* (3) for a *constraint*. "The curve passes
+through git's point" collapsed *shown* into *argued*. The correct claim keeps every
+tier distinct: git is a point; Fram **demonstrably reaches points past git's**
+(shown, §0); occupying git's *own* point is **architectural** (argued, unbuilt);
+the **cheaper** gate there is a **sequel build** (§7 Phase 0). Same discipline,
+applied to the geometry: never let *shown*, *argued*, and *future* wear one word.
+
+---
+
+## 9. Close-out (research arc ended here) — banked / architectural / non-claims / sequel
+
+**BANKED (measured or code-true):**
+- RAW propagation is synchronous (~0.1 ms, first read reflects the write; no
+  polling). Eager per-edit visibility is real — a corner git's barrier forbids.
+- DERIVED reads are lazy-on-read (reader pays the resolve walk; NO-OP repeats ~0;
+  no background re-resolve).
+- Same-insertion-point edit-safety: git **conflicts** (raw *and* merge-queue);
+  Fram-today **silently corrupts** (`fN` multi-valued, no commit-time conflict
+  detection — LIVE). Different-point growth: git auto-merges.
+- Git's lone substrate win is **one** thing, two faces (compute + coherence):
+  joint pre-exposure validation, priced in barrier latency.
+- The *current derived-read* scoped re-resolve does **not** beat whole-corpus at
+  K=11 (fixed `corpus-from-store!` scan dominates).
+
+**ARGUED (architectural, true-but-unbuilt — say "in principle"):**
+- Fram can occupy git's own point (git-mode: stage → joint-validate → publish with
+  a real staging/published view boundary). Substrate-neutral, not demonstrated.
+
+**EXPLICIT NON-CLAIMS (do not assert):**
+- NOT "Fram is the whole curve, measured." (Only the past-git half is measured.)
+- NOT "Fram's gate is cheaper than git's." (Sequel; probe came back YELLOW→RED.)
+- NOT "Fram does git's thing better." (Better-half = the sequel; unbuilt.)
+- NOT "dense `fN` over-serializes." (It *under-protects* / corrupts — §5.)
+- NOT "scoped re-resolve proves anything about gate cost." (Confound — §2.)
+
+**SEQUEL BACKLOG (not under talk deadline):**
+- git-mode gate + the cheaper-gate measurement (#34) — first task: resolve
+  RED-vs-YELLOW (can `*corpus-scope*` build only the import-closure's frames?).
+- C-mode tiebroken ordering key (#32) — known-positive demo, carries the #11b
+  decoupling tax (machine-chosen order).
+- add-comment authoring verb (#30) → unblocks schema/lookup honesty note (#28).
+- Beagle README (#23) — blocked on org-map facts (firnos→?, chelonia→?,
+  gjøa-location; org name = Autonymy is settled).
+
+The arc closes on a **real result**: banked wins, banked holes, three seductive
+false stories caught (premise inversion, confound-vs-headwind, shown-vs-argued).
+That is research.
