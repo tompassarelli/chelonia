@@ -340,10 +340,24 @@
                                     (catch Throwable _ false)))
                              @subscribers)))))))
 
-;; kind from the value: @-prefixed => ref (link), else literal (assert) — exactly
-;; the convention the migration loader used, so daemon writes stay consistent with
-;; the migrated store.
-(defn- kind-of [r] (if (and r (str/starts-with? (str r) "@")) :link :assert))
+;; ref-shape? — is a STRING value a node reference (a link), vs a literal that
+;; merely starts with '@'? The convention is "@-prefixed => ref", but a bare "@"
+;; or "@ " is a legitimate LITERAL (e.g. a comment lexeme discussing the `@id`
+;; syntax — tools.bclj/import.bclj/main.bclj all carry one). A real reference —
+;; a thread id (@2026-06-15-150040) or a code node-name (@mod#123) — is "@" + at
+;; least one char AND contains NO whitespace (ids/node-names are whitespace-free by
+;; construction). So: starts with '@', length > 1, no whitespace. This closes a
+;; render-from-log fidelity hole where "@" was mis-stored as a link to a phantom
+;; node, and the renderer then got an entity-id where it expected the string "@".
+(defn- ref-shape? [^String s]
+  (and (> (.length s) 1)
+       (= \@ (.charAt s 0))
+       (not (re-find #"\s" s))))
+
+;; kind from the value: a ref-shaped @-string => ref (link), else literal (assert)
+;; — exactly the convention the migration loader uses, so daemon writes stay
+;; consistent with the migrated store.
+(defn- kind-of [r] (if (and (string? r) (ref-shape? r)) :link :assert))
 
 ;; reserved engine predicates (identity + metadata) — a DOMAIN write to one would
 ;; collide with the reified schema layer and silently corrupt; reject at the boundary.
@@ -927,7 +941,11 @@
 ;; one-engine is preserved); ref-ness follows the @-prefix convention. A true
 ;; reversible drop-in for coord.clj: same log, same protocol, reified underneath.
 ;; ===========================================================================
-(defn- ref-str? [x] (and (string? x) (str/starts-with? x "@")))
+;; ref-str? — a value is a node LINK iff it's a ref-shaped @-string (see ref-shape?:
+;; "@" + ≥1 char + no whitespace). A bare "@" / "@ " literal (a comment lexeme about
+;; the `@id` syntax) is an ASSERT, NOT a link — else migration mints a phantom "@"
+;; node and render-from-log breaks (string-append on an entity-id). Mirrors kind-of.
+(defn- ref-str? [x] (and (string? x) (ref-shape? x)))
 
 (defn migrate-flat->co [flat]
   (let [;; drop torn/partial lines BEFORE folding: the live flat log is appended

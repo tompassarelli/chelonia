@@ -195,7 +195,23 @@
           (chk "FLIP: .bclj re-rendered (new body present -> render-from-log ran)"
                (and (not= before after) (str/includes? after "p (c/value-id ctx pname)")))
           (chk "FLIP: the AST delta is DURABLE in the code log (kind/v/fN lines appended)"
-               (boolean (re-find #":p \"(kind|v|f\d+)\"" log-txt))))
+               (boolean (re-find #":p \"(kind|v|f\d+)\"" log-txt)))
+          ;; (g) THE UNFAKEABLE CHECK — the edit path reads ZERO src/fram/*.bclj.
+          ;; MOVE the module's .bclj entirely aside (so any text-read would fail),
+          ;; run a SECOND flip set-body, and assert it STILL succeeds and the .bclj
+          ;; is RE-CREATED from the log. If the edit path sourced from text, this is
+          ;; impossible (the source is gone); succeeding proves it is graph-sourced.
+          (let [aside (str schema-src ".aside")]
+            (.renameTo (io/file schema-src) (io/file aside))
+            (let [gone? (not (.exists (io/file schema-src)))
+                  r2 (flip-call! 21 "set-body" {:module "schema" :name "cardinality"
+                                                :body "(let [q (c/value-id ctx pname)] (if (some? q) \"single\" \"multi\"))"})
+                  recreated (when (.exists (io/file schema-src)) (slurp schema-src))]
+              (chk "FLIP (no-text): module .bclj was removed before the edit" gone?)
+              (chk "FLIP (no-text): set-body STILL succeeds with the .bclj absent (graph-sourced)"
+                   (not (reply-iserr r2)))
+              (chk "FLIP (no-text): the .bclj is RE-CREATED from the log with the new body"
+                   (and recreated (str/includes? recreated "q (c/value-id ctx pname)"))))))
         (finally (p/destroy-tree daemon))))))
 
 ;; ---------------------------------------------------------------------------

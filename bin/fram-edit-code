@@ -1,0 +1,185 @@
+#!/usr/bin/env bb
+;; ============================================================================
+;; fram-edit-code — THE FLIP, the CORE: an authoring edit sourced FROM the graph.
+;; ============================================================================
+;; The inversion. The legacy edit path (fram_mcp.clj route-edit) emit-edn's every
+;; src/fram/*.bclj into a FRESH store, runs the verb over that TEXT-derived AST,
+;; renders, and commits a delta computed from regenerated text — so the graph is
+;; DOWNSTREAM of text. This is the opposite:
+;;
+;;   1. boot a reified store FROM .fram/code.log (migrate-flat->co — the SAME boot
+;;      fram-render-code uses; in-process, no socket). This store IS the corpus.
+;;   2. run the authoring verb (rename / set-body / upsert-form) over THAT store
+;;      via resolve.clj run-verb-warm! — the verb mints/supersedes claim ops
+;;      against LOG-RESIDENT node identity (@<mod>#int), never reading any .bclj.
+;;      corpus-from-store! derives srcs/frames from the store's `name` claims, so
+;;      the verb resolves cross-module references against the WHOLE-LOG corpus.
+;;   3. render the affected module FROM the mutated store (extract-file! already
+;;      wrote the resolved EDN under $RESOLVE_OUT) -> .bclj, written ATOMICALLY
+;;      (temp + fsync + rename — B1: a failed render can never truncate a file).
+;;   4. commit the AST delta THROUGH the coordinator (bin/fram-commit-code, the
+;;      serialized single-(te,p,r) :assert/:retract wire) so the log is updated.
+;;      The .bclj fed to fram-commit-code is render(LOG), NOT a src/fram file —
+;;      so the WHOLE path reads ZERO src/fram/*.bclj.
+;;
+;; The recompile gate (beagle-build-all over the rendered module) is the caller's
+;; responsibility (fram_mcp.clj route-edit runs it before committing). This script
+;; renders + commits; pass --no-commit to render-only (the gate's pre-step).
+;;
+;; USAGE:
+;;   bin/fram-edit-code <op> <module> [verb args] --port <P> [--log <code.log>]
+;;                                                [--out <file.bclj>] [--no-commit]
+;;     ops:
+;;       rename      <module> --old <name> --new <name>
+;;       set-body    <module> --name <defn> --body-file <edn>
+;;       upsert-form <module> --spec-file <edn>
+;;     --port   REQUIRED unless --no-commit — coordinator serving the CODE log.
+;;     --log    code log to boot the store from (default $PWD/.fram/code.log).
+;;     --out    where to write the rendered .bclj (default: a temp file path is
+;;              printed). The committed log is canonical; --out is just the view.
+;;     --no-commit  render the affected module from the (in-memory) edited store
+;;                  and stop — do NOT commit (used as the recompile-gate pre-step).
+;;
+;; SAFETY: --port must serve a *code.log (fram-commit-code asserts this). NEVER
+;; the live lodestar coordinator. NO src/fram/*.bclj is read on this path.
+;; Env: BEAGLE_HOME, FRAM_ROUNDTRIP, FRAM_RESOLVE, FRAM_BIN, FRAM_OUT.
+;; ============================================================================
+(require '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[clojure.edn :as edn]
+         '[babashka.process :as proc]
+         '[fram.cnf :as c]
+         '[fram.schema :as s])
+(import '[java.nio.file Files CopyOption StandardCopyOption]
+        '[java.io File FileOutputStream RandomAccessFile])
+
+(defn- die [& xs] (binding [*out* *err*] (apply println xs)) (System/exit 1))
+(defn- log! [& xs] (binding [*out* *err*] (apply println xs)))
+
+(def ^:private home (System/getProperty "user.home"))
+(def ^:private beagle-home   (or (System/getenv "BEAGLE_HOME") (str home "/code/beagle")))
+(def ^:private roundtrip-rkt (or (System/getenv "FRAM_ROUNDTRIP")
+                                 (str beagle-home "/beagle-lib/private/claims-roundtrip.rkt")))
+(def ^:private resolve-clj   (or (System/getenv "FRAM_RESOLVE")
+                                 (str (System/getProperty "user.dir") "/chartroom/src/resolve.clj")))
+(def ^:private fram-out      (or (System/getenv "FRAM_OUT") (str (System/getProperty "user.dir") "/out")))
+(def ^:private bin-dir       (or (System/getenv "FRAM_BIN") (str (System/getProperty "user.dir") "/bin")))
+
+;; resolve.clj's tail runs (-main) iff (first *command-line-args*) is a recognized
+;; MODE. Our bin's own first arg (e.g. "set-body") collides with that set, AND
+;; cnf_coord_daemon.clj itself load-files resolve.clj — so MASK the CLI args around
+;; BOTH loads. We drive resolve.clj's verbs via run-verb-warm!, never its -main.
+;; (fram-render-code is immune: its first arg is a module name, not a MODE.)
+(def ^:private the-args (vec *command-line-args*))   ; capture before masking
+(binding [*command-line-args* []]
+  (load-file "cnf_coord_daemon.clj")          ; migrate-flat->co + warm-store machinery
+  (load-file resolve-clj))                     ; run-verb-warm! / extract-file! / out-path
+
+;; --- B1: ATOMIC write — render to a temp file in the SAME dir, fsync, then
+;; rename-into-place. A partial/failed render can never truncate the live target
+;; (rename is atomic on the same filesystem; the temp is fsync'd before rename).
+(defn- atomic-spit! [target ^String content]
+  (let [t (io/file target)
+        dir (or (.getParentFile t) (io/file "."))
+        tmp (File/createTempFile (str ".fram-render-" (.getName t) "-") ".tmp" dir)]
+    (try
+      (with-open [os (FileOutputStream. tmp)]
+        (.write os (.getBytes content "UTF-8"))
+        (.flush os)
+        ;; fsync the temp before rename — via the FileChannel (FileDescriptor.sync
+        ;; is sandboxed in bb; .force(true) on the channel is the same fsync).
+        (.force (.getChannel os) true))
+      (let [tp (.toPath tmp) targp (.toPath t)]
+        (try
+          (Files/move tp targp
+                      (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                                              StandardCopyOption/REPLACE_EXISTING]))
+          (catch Exception _                            ; ATOMIC_MOVE unsupported on this FS
+            (Files/move tp targp
+                        (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])))))
+      (finally (when (.exists tmp) (.delete tmp))))))
+
+(defn- parse-args [args]
+  (loop [a (drop 2 args)
+         opts {:op (first args) :module (second args)
+               :port nil :log nil :out nil :no-commit false
+               :old nil :new nil :name nil :body-file nil :spec-file nil}]
+    (cond
+      (empty? a) opts
+      (= "--port" (first a)) (recur (drop 2 a) (assoc opts :port (Integer/parseInt (second a))))
+      (= "--log" (first a)) (recur (drop 2 a) (assoc opts :log (second a)))
+      (= "--out" (first a)) (recur (drop 2 a) (assoc opts :out (second a)))
+      (= "--no-commit" (first a)) (recur (rest a) (assoc opts :no-commit true))
+      (= "--old" (first a)) (recur (drop 2 a) (assoc opts :old (second a)))
+      (= "--new" (first a)) (recur (drop 2 a) (assoc opts :new (second a)))
+      (= "--name" (first a)) (recur (drop 2 a) (assoc opts :name (second a)))
+      (= "--body-file" (first a)) (recur (drop 2 a) (assoc opts :body-file (second a)))
+      (= "--spec-file" (first a)) (recur (drop 2 a) (assoc opts :spec-file (second a)))
+      :else (recur (rest a) opts))))
+
+(let [{:keys [op module port log out no-commit old new name body-file spec-file]} (parse-args the-args)
+      log-path (or log (str (System/getProperty "user.dir") "/.fram/code.log"))]
+  (when (str/blank? op) (die "usage: bin/fram-edit-code <op> <module> [verb args] --port <P> [--log <code.log>] [--out <file>] [--no-commit]"))
+  (when (str/blank? module) (die "module is required (the @<mod># prefix to edit, e.g. schema)"))
+  (when-not (.exists (io/file log-path)) (die "no code log at" log-path "(run bin/fram-ingest-code first)"))
+  (when (and (not no-commit) (nil? port)) (die "--port <P> is REQUIRED unless --no-commit"))
+
+  ;; build the verb spec from the op-specific flags.
+  (let [spec (case op
+               "rename"      (do (when (or (str/blank? old) (str/blank? new))
+                                   (die "rename needs --old <name> --new <name>"))
+                                 {:op "rename" :module module :old old :new new})
+               "set-body"    (do (when (or (str/blank? name) (str/blank? body-file))
+                                   (die "set-body needs --name <defn> --body-file <edn>"))
+                                 (when-not (.exists (io/file body-file)) (die "no body file:" body-file))
+                                 {:op "set-body" :module module :name name
+                                  :datum (edn/read-string (slurp body-file))})
+               "upsert-form" (do (when (str/blank? spec-file) (die "upsert-form needs --spec-file <edn>"))
+                                 (when-not (.exists (io/file spec-file)) (die "no spec file:" spec-file))
+                                 {:op "upsert-form" :module module
+                                  :datum (edn/read-string (slurp spec-file))})
+               (die "unknown op:" op "(rename | set-body | upsert-form)"))]
+
+    ;; 1. boot the reified store over the code log (in-process; this IS the corpus).
+    (let [coord (migrate-flat->co log-path)
+          st    (:store coord)
+          ;; per-run resolve-out so the verb's extract-file! projection lands here.
+          resolve-out (or (System/getenv "RESOLVE_OUT")
+                          (str (System/getProperty "java.io.tmpdir") "/fram-edit-" (System/nanoTime)))]
+      (.mkdirs (io/file resolve-out))
+      ;; confirm the module is in the log before mutating (fail-fast, clear message).
+      (let [root-id (s/resolve-name st (str "@" module "#root"))]
+        (when-not root-id
+          (die "module" module "has no @" module "#root claim in" log-path "(was it ingested?)")))
+
+      ;; 2. run the verb over the warm store. :resolve-out routes the verb's
+      ;;    extract-file! projection into resolve-out (in-process, no env needed);
+      ;;    run-verb-warm! binds *project-srcs* to the affected module so only that
+      ;;    module's resolved EDN is written. NO src/fram/*.bclj is read.
+      (let [affected (resolve/run-verb-warm! st (assoc spec :resolve-out resolve-out))
+            proj-edn (str resolve-out "/resolved-" affected ".edn")]
+        (when-not (.exists (io/file proj-edn))
+          (die "verb produced no projected EDN at" proj-edn
+               "(the verb may have REJECTED the edit; see stderr above)"))
+
+        ;; 3. render the affected module FROM the projected EDN -> .bclj (ATOMIC).
+        (let [r (proc/sh {:out :string :err :string} "racket" roundtrip-rkt "--render" proj-edn)]
+          (when (not (zero? (:exit r))) (die "render FAILED for" affected "\n" (:err r)))
+          (let [out-file (or out (str resolve-out "/" affected ".bclj"))]
+            (atomic-spit! out-file (:out r))
+            (log! "fram-edit-code: rendered" affected "->" out-file
+                  (str "(" (count (:out r)) " bytes; pure function of the edited log-booted store; atomic write)"))
+
+            ;; 4. commit the AST delta THROUGH the coordinator (unless --no-commit).
+            (if no-commit
+              (do (log! "fram-edit-code: --no-commit — rendered only, committed NOTHING")
+                  (println out-file))             ; stdout = the rendered .bclj path
+              (let [commit (proc/sh {:out :string :err :string}
+                                    "bb" "-cp" fram-out (str bin-dir "/fram-commit-code")
+                                    affected out-file "--port" (str port))]
+                (log! (str/trim (str (:out commit) (:err commit))))
+                (when (not (zero? (:exit commit)))
+                  (die "commit FAILED — the code log was NOT updated"))
+                (log! "fram-edit-code: COMMITTED" affected
+                      "— AST delta written to the code log via the coordinator (the log is canonical; .bclj is downstream)")
+                (println out-file)))))))))

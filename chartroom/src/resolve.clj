@@ -830,8 +830,20 @@
   (with-open [w (clojure.java.io/writer out-path)]
     (binding [*out* w]
       (println (str "@file " src))
-      (let [wrap (when (seq *deleted-forms*) (wrapper-of src))]
-        (doseq [e (@file->ents src) :when (not (*deleted-subtree* e)), cid (c/by-l ctx e)]
+      (let [wrap (when (seq *deleted-forms*) (wrapper-of src))
+            ;; REACHABILITY filter: emit ONLY nodes reachable from the beagle-file
+            ;; wrapper via LIVE structural edges (fN/tail/segN/commentN/child). An
+            ;; authoring verb that SUPERSEDES a body/form fN edge (set-body, upsert
+            ;; REPLACE) leaves the OLD subtree's nodes in file->ents with their parent
+            ;; edge retired — so they become parentless ROOT CANDIDATES that the
+            ;; renderer's edn-root may pick instead of the real wrapper (observed:
+            ;; render of a re-edited module collapsed to just the orphaned old body).
+            ;; Restricting to descendants(wrapper) drops those orphans cleanly. (Skip
+            ;; the filter under the delete path, which has its own subtree machinery.)
+            root  (when (empty? *deleted-forms*) (wrapper-of src))
+            live  (when root (descendants root))
+            keep? (fn [e] (or (nil? live) (contains? live e)))]
+        (doseq [e (@file->ents src) :when (and (not (*deleted-subtree* e)) (keep? e)), cid (c/by-l ctx e)]
           (let [cl (c/claim-of ctx cid) p (:p cl) r (:r cl) ps (c/literal ctx p)]
             (cond
               ;; wrapper form-edges under a delete: drop them; renumbered ones re-emitted below
@@ -858,9 +870,14 @@
           (let [forms (remove *deleted-forms* (rest (ordered-children wrap)))]
             (doseq [[i f] (map-indexed vector forms)]
               (println (str "[" wrap " \"f" (inc i) "\" " f "]")))))))))
-;; render output dir honors $RESOLVE_OUT (default /tmp) so concurrent gate runs / agents
-;; don't collide on a global /tmp/resolved-*.edn — the gates set it to a per-run temp dir.
-(defn out-path [src] (str (or (System/getenv "RESOLVE_OUT") "/tmp") "/resolved-" (-> src (str/split #"/") last) ".edn"))
+;; render output dir honors *resolve-out* (default $RESOLVE_OUT, then /tmp) so
+;; concurrent gate runs / agents don't collide on a global /tmp/resolved-*.edn —
+;; the gates set it to a per-run temp dir. *resolve-out* is the IN-PROCESS override
+;; (System/getenv can't be set at runtime, so the warm-store driver binds this var
+;; to route the verb's projection into a per-run dir without re-launching bb).
+(def ^:dynamic *resolve-out* nil)
+(defn out-path [src] (str (or *resolve-out* (System/getenv "RESOLVE_OUT") "/tmp")
+                          "/resolved-" (-> src (str/split #"/") last) ".edn"))
 
 ;; --- no-capture invariant ---------------------------------------------------
 ;; Renaming def B to `new` is UNSOUND if a reference to B would, after rendering
@@ -982,6 +999,181 @@
     (doseq [src srcs] (println (str "projected -> " (out-path src) "   <- " src)))))
 
 ;; ============================================================================
+;; STANDALONE AUTHORING VERBS — the SAME arm bodies as the -main case, lifted to
+;; named functions so BOTH drivers can run them: the TEXT path (-main, over
+;; resolve-edn! of emit-edn(text)) AND the GRAPH path (run-verb-warm!, over a
+;; LOG-booted warm store via resolve-warm-store!). They are store-agnostic by
+;; construction — they read the dynamic ctx/tx/SUP/srcs/frame tables and write
+;; via c/claim!/retire-claim!/mint-datum!, never touching text — so the same code
+;; runs unchanged under either binding scope.
+;;
+;; *project-srcs* selects which module(s) author-emit! / extract-file! project.
+;; The TEXT path projects EVERY src (whole-corpus EDN round-trip, the old shape).
+;; The GRAPH path binds it to just the affected module — render-from-store needs
+;; only that one, and projecting the 11-module warm corpus would be wasteful.
+;; Default = nil => "all srcs" (verbatim text-path behavior).
+(def ^:dynamic *project-srcs* nil)
+(defn- emit-srcs [] (or *project-srcs* srcs))
+;; like author-emit!, but only over *project-srcs* (the affected module on the graph path).
+(defn author-emit-scoped! [op detail]
+  (doseq [src (emit-srcs)] (extract-file! src (out-path src)))
+  (binding [*out* *err*]
+    (println (str "================ authoring: " op " ================"))
+    (println detail)
+    (doseq [src (emit-srcs)] (println (str "projected -> " (out-path src) "   <- " src)))))
+
+;; rename — every INVARIANT + claim mutation from the old `rename` case arm.
+(defn verb-rename! [old new target]
+  (let [target-srcs (filter #(str/includes? % target) srcs)
+        edits (atom 0)]
+    (doseq [src target-srcs]
+      (when (and (def-binding src old) (def-binding src new))
+        (binding [*out* *err*]
+          (println (str "REJECTED — `" new "` already names a binding in " src
+                        " (rename-doesn't-collide; no claims mutated).")))
+        (System/exit 3)))
+    (doseq [src target-srcs]
+      (when (and (get (file-typeframe src) old) (not (re-find #"^[A-Z]" new)))
+        (binding [*out* *err*]
+          (println (str "REJECTED — `" new "` is not a valid (Capitalized) type name "
+                        "(beagle type-name shape; no claims mutated).")))
+        (System/exit 3)))
+    (doseq [src target-srcs]
+      (when-let [B (def-binding src old)]
+        (let [caps (mapcat (fn [s] (mapcat #(capture-refs % (list (file-modframe s)) B new)
+                                           (forms-of s))) srcs)]
+          (when (seq caps)
+            (binding [*out* *err*]
+              (println (str "REJECTED — renaming `" old "` -> `" new "` would be CAPTURED by a local `"
+                            new "` in scope at " (count caps) " reference(s) (no-capture; no claims mutated).")))
+            (System/exit 4)))))
+    (let [target-mods (set (keep module-name target-srcs))]
+      (doseq [src srcs :when (not (some #{src} target-srcs))]
+        (let [{:keys [refer rename]} (parse-require src)]
+          (when (and (contains? target-mods (get refer old))
+                     (or (def-binding src new) (get refer new) (get rename new)))
+            (binding [*out* *err*]
+              (println (str "REJECTED — renaming `" old "` -> `" new "` would DUPLICATE a binding in consumer "
+                            src " (it already binds `" new "`; no-import-collision; no claims mutated).")))
+            (System/exit 3)))))
+    (doseq [src target-srcs]
+      (when-let [B (def-binding src old)]
+        (let [oldc (first (filter #(= Vp (:p (c/claim-of ctx %))) (c/by-l ctx B)))
+              nc (c/claim! ctx B Vp (c/value! ctx new) tx)]
+          (c/claim! ctx nc SUP oldc tx) (swap! edits inc))))
+    (when (zero? @edits)
+      (binding [*out* *err*]
+        (println (str "REJECTED — no binding named `" old "` found in \"" target
+                      "\" (nothing to rename; no claims mutated).")))
+      (System/exit 5))
+    (doseq [src (emit-srcs)] (extract-file! src (out-path src)))
+    (binding [*out* *err*]
+      (println "================ Turtle #5 — O(1) shadow-correct rename ================")
+      (println (str "edit: rename def `" old "` -> `" new "` in \"" target "\""))
+      (println (str "CLAIMS EDITED: " @edits "  (just the definition's name; references follow refers_to)"))
+      (doseq [src (emit-srcs)] (println (str "projected -> " (out-path src) "   <- " src))))))
+
+;; upsert-form — add/replace a top-level def from an EDN datum spec.
+(defn verb-upsert-form! [scope datum]
+  (let [target-srcs (filter #(str/includes? % scope) srcs)]
+    (when (not= 1 (count target-srcs))
+      (binding [*out* *err*]
+        (println (str "REJECTED — scope \"" scope "\" matches " (count target-srcs)
+                      " source files; upsert-form needs exactly one (no claims mutated).")))
+      (System/exit 3))
+    (when (and (seq? datum) (not (VALUE-DEFS (str (first datum)))))
+      (binding [*out* *err*]
+        (println (str "REJECTED — upsert-form spec head `" (first datum)
+                      "` is not a value def (def/defn/...); no claims mutated.")))
+      (System/exit 3))
+    (let [src (first target-srcs)
+          wrap (wrapper-of src)
+          forms (vec (fN-claims wrap))
+          new-name (when (and (seq? datum) (VALUE-DEFS (str (first datum)))) (str (second datum)))
+          existing (when new-name (def-binding src new-name))
+          victim-form (when existing (form-for-victim src existing))
+          victim-entry (when victim-form (some (fn [[n cid r]] (when (= r victim-form) [n cid r])) forms))
+          new-root (mint-datum! src datum)]
+      (if victim-entry
+        (let [[n cid _] victim-entry]
+          (retire-claim! cid)
+          (c/claim! ctx wrap (c/value! ctx (str "f" n)) new-root tx))
+        (let [next-n (inc (apply max (map first forms)))]
+          (c/claim! ctx wrap (c/value! ctx (str "f" next-n)) new-root tx)))
+      (re-resolve!)
+      (author-emit-scoped! "upsert-form"
+                    (str (if victim-entry "replaced" "added") " top-level def `" new-name
+                         "` in \"" scope "\" (1 form minted as claims; refs resolved via refers_to)")))))
+
+;; set-body — replace a defn's body with a freshly-minted body datum.
+(defn verb-set-body! [name scope datum]
+  (let [target-srcs (filter #(str/includes? % scope) srcs)]
+    (when (not= 1 (count target-srcs))
+      (binding [*out* *err*]
+        (println (str "REJECTED — scope \"" scope "\" matches " (count target-srcs)
+                      " source files; set-body needs exactly one (no claims mutated).")))
+      (System/exit 3))
+    (let [src (first target-srcs)
+          B (def-binding src name)
+          form (when B (form-for-victim src B))
+          d (when form (unwrap-def form))]
+      (when (or (nil? form) (not (PARAM-FORMS (head-sym d))))
+        (binding [*out* *err*]
+          (println (str "REJECTED — `" name "` is not a defn with a body in \"" scope
+                        "\" (set-body needs a defn; no claims mutated).")))
+        (System/exit 5))
+      (let [kids (fN-claims d)
+            bracket-n (some (fn [[n _ r]] (when (brackets? r) n)) kids)
+            ret? (some (fn [[n _ r]] (and (= n (inc bracket-n)) (TYPE-COLON (sym-val r)))) kids)
+            body-start (+ bracket-n (if ret? 3 1))
+            body-slots (filter (fn [[n _ _]] (>= n body-start)) kids)
+            new-root (mint-datum! src datum)]
+        (when (empty? body-slots)
+          (binding [*out* *err*]
+            (println (str "REJECTED — `" name "` has no body fN edges to replace; no claims mutated.")))
+          (System/exit 5))
+        (doseq [[_ cid _] body-slots] (retire-claim! cid))
+        (c/claim! ctx d (c/value! ctx (str "f" body-start)) new-root tx)
+        (re-resolve!)
+        (author-emit-scoped! "set-body"
+                      (str "replaced body of defn `" name "` in \"" scope "\" ("
+                           (count body-slots) " body slot(s) superseded; new body minted as claims)"))))))
+
+;; ============================================================================
+;; run-verb-warm! — THE GRAPH EDIT PATH. Run an authoring verb over a LOG-booted
+;; warm store (NOT emit-edn of text). `store` is `(migrate-flat->co code.log)`'s
+;; :store; resolve-warm-store! binds ctx=store + tx + the store-local value-ids +
+;; corpus-from-store! (srcs/frames derived from the store's `name` claims), runs
+;; the lexical walk, then invokes our body. Inside that scope we bind
+;; *project-srcs* to the affected module and call the SAME verb function the text
+;; path calls — minting/superseding claim ops against LOG-RESIDENT node identity,
+;; projecting render EDN for ONLY that module. NO src/fram/*.bclj is ever read:
+;; the corpus, the verb's targets, and the projection all come from the store.
+;;
+;; `spec` is {:op "rename"|"upsert-form"|"set-body" + verb args + optional
+;; :resolve-out (the in-process projection dir; bound to *resolve-out* so the
+;; verb's extract-file! writes resolved EDN there without re-launching bb)}.
+;; Returns the affected module name (so the caller renders + commits exactly that
+;; module). The store is mutated IN PLACE; the caller renders the affected module
+;; FROM the projected EDN — the .bclj is downstream of the log.
+;; ============================================================================
+(defn run-verb-warm! [store spec]
+  (let [module (:module spec)]
+    (binding [*resolve-out* (:resolve-out spec)]      ; nil => env/$RESOLVE_OUT/tmp
+      (resolve-warm-store!
+       store
+       (fn []
+         (binding [*project-srcs* (when module
+                                    (filter #(str/includes? % module) srcs))]
+           (case (:op spec)
+             "rename"      (verb-rename! (:old spec) (:new spec) module)
+             "upsert-form" (verb-upsert-form! module (:datum spec))
+             "set-body"    (verb-set-body! (:name spec) module (:datum spec))
+             (do (binding [*out* *err*] (println (str "run-verb-warm!: unknown op " (:op spec))))
+                 (System/exit 2)))))))
+    module))
+
+;; ============================================================================
 ;; CLI entry. Slice the edn paths off *command-line-args* per mode (the old
 ;; `(def srcs ...)` slice), then run the WHOLE pipeline + mode dispatch inside
 ;; one `resolve-edn!` binding scope, so dispatch reads the freshly-bound store /
@@ -1012,68 +1204,8 @@
                     " references carry refers_to; projected (identity) -> " (out-path src)))))
 
   "rename"
-  (let [[old new target] (drop 1 *command-line-args*)
-        target-srcs (filter #(str/includes? % target) srcs)
-        edits (atom 0)]
-    ;; INVARIANT (now EXACT via the resolver): refuse if `new` already names a
-    ;; module binding in a file we'd rename. id-based, not a spelling heuristic.
-    (doseq [src target-srcs]
-      (when (and (def-binding src old) (def-binding src new))
-        (binding [*out* *err*]
-          (println (str "REJECTED — `" new "` already names a binding in " src
-                        " (rename-doesn't-collide; no claims mutated).")))
-        (System/exit 3)))
-    ;; INVARIANT (type-name shape): beagle type names must be Capitalized — renaming a
-    ;; TYPE (record/union/variant/protocol) to a lowercase name builds 'unknown type'.
-    (doseq [src target-srcs]
-      (when (and (get (file-typeframe src) old) (not (re-find #"^[A-Z]" new)))
-        (binding [*out* *err*]
-          (println (str "REJECTED — `" new "` is not a valid (Capitalized) type name "
-                        "(beagle type-name shape; no claims mutated).")))
-        (System/exit 3)))
-    ;; INVARIANT (no-capture): refuse if a reference to the renamed def would be
-    ;; captured by a LOCAL `new` in scope (checked across ALL srcs — a :refer'd bare
-    ;; ref lives in a consumer file). Scope-precise via the resolver, not a heuristic.
-    (doseq [src target-srcs]
-      (when-let [B (def-binding src old)]
-        (let [caps (mapcat (fn [s] (mapcat #(capture-refs % (list (file-modframe s)) B new)
-                                           (forms-of s))) srcs)]
-          (when (seq caps)
-            (binding [*out* *err*]
-              (println (str "REJECTED — renaming `" old "` -> `" new "` would be CAPTURED by a local `"
-                            new "` in scope at " (count caps) " reference(s) (no-capture; no claims mutated).")))
-            (System/exit 4)))))
-    ;; INVARIANT (no-import-collision): a consumer that :refer's `old` from the target
-    ;; will, after rename, bind `new` — refuse if that consumer ALREADY binds `new` (a
-    ;; local def or another import), which would duplicate the binding (invalid module).
-    (let [target-mods (set (keep module-name target-srcs))]
-      (doseq [src srcs :when (not (some #{src} target-srcs))]
-        (let [{:keys [refer rename]} (parse-require src)]
-          (when (and (contains? target-mods (get refer old))
-                     (or (def-binding src new) (get refer new) (get rename new)))
-            (binding [*out* *err*]
-              (println (str "REJECTED — renaming `" old "` -> `" new "` would DUPLICATE a binding in consumer "
-                            src " (it already binds `" new "`; no-import-collision; no claims mutated).")))
-            (System/exit 3)))))
-    (doseq [src target-srcs]
-      (when-let [B (def-binding src old)]                  ; value OR type def binding occurrence
-        (let [oldc (first (filter #(= Vp (:p (c/claim-of ctx %))) (c/by-l ctx B)))
-              nc (c/claim! ctx B Vp (c/value! ctx new) tx)]
-          (c/claim! ctx nc SUP oldc tx) (swap! edits inc))))
-    ;; INVARIANT (rename-hits-something): a rename that edits 0 bindings means `old`
-    ;; names nothing in scope (e.g. an unsupported form) — refuse rather than report
-    ;; a misleading success on an unchanged tree.
-    (when (zero? @edits)
-      (binding [*out* *err*]
-        (println (str "REJECTED — no binding named `" old "` found in \"" target
-                      "\" (nothing to rename; no claims mutated).")))
-      (System/exit 5))
-    (doseq [src srcs] (extract-file! src (out-path src)))
-    (binding [*out* *err*]
-      (println "================ Turtle #5 — O(1) shadow-correct rename ================")
-      (println (str "edit: rename def `" old "` -> `" new "` in \"" target "\""))
-      (println (str "CLAIMS EDITED: " @edits "  (just the definition's name; references follow refers_to)"))
-      (doseq [src srcs] (println (str "projected -> " (out-path src) "   <- " src)))))
+  (let [[old new target] (drop 1 *command-line-args*)]
+    (verb-rename! old new target))
 
   "delete"
   (let [[name target] (drop 1 *command-line-args*)
@@ -1127,85 +1259,15 @@
   ;; ============================================================================
   "upsert-form"
   (let [[scope spec-file] (drop 1 *command-line-args*)
-        target-srcs (filter #(str/includes? % scope) srcs)
         datum (edn/read-string (slurp spec-file))]
-    ;; INVARIANT (single target): scope must name exactly one source file to author into.
-    (when (not= 1 (count target-srcs))
-      (binding [*out* *err*]
-        (println (str "REJECTED — scope \"" scope "\" matches " (count target-srcs)
-                      " source files; upsert-form needs exactly one (no claims mutated).")))
-      (System/exit 3))
-    ;; INVARIANT (well-formed def): the spec must be a top-level form whose second
-    ;; element is the def NAME symbol — else there is nothing to upsert by name.
-    (when (and (seq? datum) (not (VALUE-DEFS (str (first datum)))))
-      (binding [*out* *err*]
-        (println (str "REJECTED — upsert-form spec head `" (first datum)
-                      "` is not a value def (def/defn/...); no claims mutated.")))
-      (System/exit 3))
-    (let [src (first target-srcs)
-          wrap (wrapper-of src)
-          forms (vec (fN-claims wrap))               ; [[N claim child] ...] incl. f0=beagle-file sym
-          new-name (when (and (seq? datum) (VALUE-DEFS (str (first datum)))) (str (second datum)))
-          existing (when new-name (def-binding src new-name))
-          ;; the existing top-level form (if replacing) — locate its wrapper fN slot
-          victim-form (when existing (form-for-victim src existing))
-          victim-entry (when victim-form (some (fn [[n cid r]] (when (= r victim-form) [n cid r])) forms))
-          new-root (mint-datum! src datum)]
-      (if victim-entry
-        ;; REPLACE: supersede the old wrapper fN edge; re-point the SAME slot index.
-        (let [[n cid _] victim-entry]
-          (retire-claim! cid)
-          (c/claim! ctx wrap (c/value! ctx (str "f" n)) new-root tx))
-        ;; ADD: append at the next consecutive wrapper fN slot (max f-index + 1).
-        (let [next-n (inc (apply max (map first forms)))]
-          (c/claim! ctx wrap (c/value! ctx (str "f" next-n)) new-root tx)))
-      (re-resolve!)
-      (author-emit! "upsert-form"
-                    (str (if victim-entry "replaced" "added") " top-level def `" new-name
-                         "` in \"" scope "\" (1 form minted as claims; refs resolved via refers_to)"))))
+    (verb-upsert-form! scope datum))
 
   ;; set-body : replace a defn's BODY — supersede every post-params fN edge of the
   ;; named defn and re-wire to a freshly-minted body datum.
   "set-body"
   (let [[name scope body-file] (drop 1 *command-line-args*)
-        target-srcs (filter #(str/includes? % scope) srcs)
         datum (edn/read-string (slurp body-file))]
-    (when (not= 1 (count target-srcs))
-      (binding [*out* *err*]
-        (println (str "REJECTED — scope \"" scope "\" matches " (count target-srcs)
-                      " source files; set-body needs exactly one (no claims mutated).")))
-      (System/exit 3))
-    (let [src (first target-srcs)
-          B (def-binding src name)
-          form (when B (form-for-victim src B))
-          d (when form (unwrap-def form))]
-      ;; INVARIANT (target exists + is a defn): set-body needs a defn form whose body
-      ;; is the post-params fN edges. A bare (def x val) value has no params bracket.
-      (when (or (nil? form) (not (PARAM-FORMS (head-sym d))))
-        (binding [*out* *err*]
-          (println (str "REJECTED — `" name "` is not a defn with a body in \"" scope
-                        "\" (set-body needs a defn; no claims mutated).")))
-        (System/exit 5))
-      (let [kids (fN-claims d)                       ; [[N claim child] ...]
-            bracket-n (some (fn [[n _ r]] (when (brackets? r) n)) kids)
-            ;; the optional `:- Ret` annotation sits AFTER the params bracket; the body
-            ;; is every fN slot after that. Keep f0..(bracket + ret) — replace the rest.
-            ret? (some (fn [[n _ r]] (and (= n (inc bracket-n)) (TYPE-COLON (sym-val r)))) kids)
-            body-start (+ bracket-n (if ret? 3 1))   ; skip params, and `:- Ret` (2 slots) if present
-            body-slots (filter (fn [[n _ _]] (>= n body-start)) kids)
-            new-root (mint-datum! src datum)]
-        (when (empty? body-slots)
-          (binding [*out* *err*]
-            (println (str "REJECTED — `" name "` has no body fN edges to replace; no claims mutated.")))
-          (System/exit 5))
-        ;; supersede every old body fN edge, then wire the new single body form at the
-        ;; first body slot (a defn body is an implicit do; one form is well-formed).
-        (doseq [[_ cid _] body-slots] (retire-claim! cid))
-        (c/claim! ctx d (c/value! ctx (str "f" body-start)) new-root tx)
-        (re-resolve!)
-        (author-emit! "set-body"
-                      (str "replaced body of defn `" name "` in \"" scope "\" ("
-                           (count body-slots) " body slot(s) superseded; new body minted as claims)")))))
+    (verb-set-body! name scope datum))
 
   ;; ============================================================================
   ;; callgraph — the scope-correct call graph + transitive blast radius, derived

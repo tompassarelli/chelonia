@@ -1,0 +1,38 @@
+#!/usr/bin/env bb
+;; ============================================================================
+;; fram-modules-of-log — enumerate module NAMES from the CODE log alone.
+;; ============================================================================
+;; The flip's prove gate renders/builds the WHOLE corpus with ZERO src/fram/*.bclj
+;; on disk, so module enumeration MUST come from the log, not from globbing the
+;; source tree (fram-render-code-all globs src/fram/*.bclj — a .bclj-presence
+;; dependency that breaks the zero-.bclj gate). This lists every module that has a
+;; `@<mod>#root file ...` bookkeeping claim in the log — the ingest sentinel — one
+;; name per line, sorted.
+;;
+;;   bin/fram-modules-of-log [--log <code.log>]   (default $PWD/.fram/code.log)
+;; ============================================================================
+(require '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[clojure.edn :as edn]
+         '[fram.rt])
+
+(defn- die [& xs] (binding [*out* *err*] (apply println xs)) (System/exit 1))
+
+(let [args (vec *command-line-args*)
+      log (loop [a args l nil] (cond (empty? a) l
+                                     (= "--log" (first a)) (recur (drop 2 a) (second a))
+                                     :else (recur (rest a) l)))
+      log-path (or log (str (System/getProperty "user.dir") "/.fram/code.log"))]
+  (when-not (.exists (io/file log-path)) (die "no code log at" log-path))
+  ;; scan raw log lines for `@<mod>#root file ...` claims — the per-module ingest
+  ;; sentinel. We read the raw log (not a booted store) so this is fast + dependency-
+  ;; free; a torn tail is harmless (we only match the stable #root lines).
+  (let [mods (->> (fram.rt/read-log log-path)
+                  (keep (fn [m]
+                          (let [l (str (:l m)) p (str (:p m))]
+                            (when (and (= p "file")
+                                       (str/ends-with? l "#root")
+                                       (str/starts-with? l "@"))
+                              (subs l 1 (- (count l) (count "#root")))))))
+                  distinct sort)]
+    (doseq [m mods] (println m))))
