@@ -298,8 +298,9 @@
   (try (let [r (coord-rt port req)]
          (when-not (and (map? r) (= "unknown op" (:error r))) r))
        (catch Exception _ nil)))
-(defn coord-query   [port q]  (warm-read port {:op :query :query q}))   ; -> q/run envelope | nil
-(defn coord-callers [port te] (warm-read port {:op :callers :te te}))   ; -> {:callers [...]} | nil
+(defn coord-query    [port q]       (warm-read port {:op :query :query q}))   ; -> q/run envelope | nil
+(defn coord-callers  [port te]      (warm-read port {:op :callers :te te}))   ; -> {:callers [...]} | nil
+(defn coord-resolved [port te pred] (warm-read port {:op :resolved :te te :p pred})) ; -> {:value :members :ambiguous? :values} | nil — surfaces multiplicity (#3)
 
 ;; subscribe + stream commit events (one EDN line each) until disconnect
 (defn coord-watch [port]
