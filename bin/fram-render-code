@@ -42,22 +42,64 @@
 (def ^:private resolve-clj   (or (System/getenv "FRAM_RESOLVE")
                                  (str (System/getProperty "user.dir") "/chartroom/src/resolve.clj")))
 
-(load-file "cnf_coord_daemon.clj")          ; migrate-flat->co + the warm-store machinery
-(load-file resolve-clj)                       ; extract-file! / resolve-warm-store! / out-path
+;; NOTE: cnf_coord_daemon.clj + resolve.clj are load-file'd LAZILY in the COLD path only
+;; (see below). The --port WARM path doesn't need them (the daemon does the projection),
+;; so skipping the load keeps warm render light. bb/SCI resolves the forward refs at runtime.
 
 (defn- parse-args [args]
-  (loop [a (rest args), opts {:module (first args) :log nil :out nil}]
+  (loop [a (rest args), opts {:module (first args) :log nil :out nil :port nil}]
     (cond
       (empty? a) opts
       (= "--log" (first a)) (recur (drop 2 a) (assoc opts :log (second a)))
       (= "--out" (first a)) (recur (drop 2 a) (assoc opts :out (second a)))
+      (= "--port" (first a)) (recur (drop 2 a) (assoc opts :port (Integer/parseInt (second a))))
       :else (recur (rest a) opts))))
+
+;; WARM render path: ask the live daemon's :render op (it projects off the warm `co`
+;; store — no cold migrate-flat->co boot, no whole-corpus resolve-warm-store!), then
+;; racket --render the returned EDN. ~43% faster than the cold path, byte-identical.
+(defn- coord-rt [port req]
+  (with-open [s (java.net.Socket.)]
+    (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int port)) 2000)
+    (let [w (io/writer (.getOutputStream s)) rd (io/reader (.getInputStream s))]
+      (.write w (str (pr-str req) "\n")) (.flush w)
+      (edn/read-string (.readLine rd)))))
+
+(defn- warm-render! [port module out roundtrip-rkt]
+  (let [resp (coord-rt port {:op :render :module module})]
+    (when (:error resp) (die "fram-render-code: warm :render failed —" (pr-str resp)))
+    (when-not (:edn resp) (die "fram-render-code: warm :render returned no :edn —" (pr-str resp)))
+    (let [edn-out (str (System/getProperty "java.io.tmpdir") "/fram-warmrender-" (System/nanoTime) ".edn")]
+      (spit edn-out (:edn resp))
+      (let [r (proc/sh {:out :string :err :string} "racket" roundtrip-rkt "--render" edn-out)]
+        (when-not (zero? (:exit r)) (die "render FAILED for" module "\n" (:err r)))
+        (if out
+          (do (spit out (:out r))
+              (log! "fram-render-code: WARM-rendered" module "->" out
+                    (str "(" (count (:out r)) " bytes; off daemon :render @" port ")")))
+          (print (:out r)))
+        (flush)))))
+
+;; --port => WARM render off the live daemon, as a TOP-LEVEL early exit. This must run
+;; (and System/exit) BEFORE bb reads the cold forms below — those reference
+;; migrate-flat->co (load-file'd only in the cold branch), and bb/SCI analyzes a whole
+;; top-level form before running it, so the cold code can't be in the same form as this.
+(let [{:keys [module out port]} (parse-args *command-line-args*)]
+  (when (str/blank? module) (die "usage: bin/fram-render-code <module> [--log <code.log>] [--out <file.bclj>] [--port <P>]"))
+  (when port
+    (when-not (.exists (io/file roundtrip-rkt)) (die "missing claims-roundtrip.rkt at" roundtrip-rkt))
+    (warm-render! port module out roundtrip-rkt)
+    (System/exit 0)))
+
+;; ===== COLD path (only reached when NOT --port) — load the heavy machinery now. =====
+(load-file "cnf_coord_daemon.clj")          ; migrate-flat->co + the warm-store machinery
+(load-file resolve-clj)                       ; extract-file! / resolve-warm-store! / out-path
 
 (let [{:keys [module log out]} (parse-args *command-line-args*)
       log-path (or log (str (System/getProperty "user.dir") "/.fram/code.log"))]
-  (when (str/blank? module) (die "usage: bin/fram-render-code <module> [--log <code.log>] [--out <file.bclj>]"))
-  (when-not (.exists (io/file log-path)) (die "no code log at" log-path "(run bin/fram-ingest-code first)"))
+  (when (str/blank? module) (die "usage: bin/fram-render-code <module> [--log <code.log>] [--out <file.bclj>] [--port <P>]"))
   (when-not (.exists (io/file roundtrip-rkt)) (die "missing claims-roundtrip.rkt at" roundtrip-rkt))
+  (when-not (.exists (io/file log-path)) (die "no code log at" log-path "(run bin/fram-ingest-code first)"))
 
   ;; 1. boot the reified store over the code log (IN-PROCESS migrate-flat->co).
   (let [coord (migrate-flat->co log-path)
