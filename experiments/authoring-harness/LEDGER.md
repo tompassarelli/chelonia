@@ -391,3 +391,27 @@ persistent toolchain (persistent beagle + persistent fram clients + persistent r
 substrate floor. Warm-render demonstrated one leg of that. Remaining legs = persistent processes (bigger,
 beagle-side). This is the measured proof that arm-G latency is ENGINEERING-CLOSABLE execution, not substrate.
 
+### TRACK B STATUS (2026-06-20T19:20Z) — thesis deliverable DONE; remainder is product polish at diminishing returns
+**Delivered (thesis-relevant, committed):**
+- Decomposition (S-TRACKB-DECOMP): arm-G latency is process-startup EXECUTION, not substrate (graph op
+  sub-ms) and not typing tax (negligible at module scale). Corrected the earlier "5s recompile = typing tax"
+  (it was a cold racket .zo artifact; warm = ~645ms beagle startup).
+- Warm render BUILT + measured + correctness-verified (S-TRACKB-WARMRENDER): daemon `:render` op + wired
+  `fram-render-code --port`; cold 644ms → warm 338ms (~47%), **byte-identical**. arm-G end-to-end warm = 1396ms.
+- **Conclusion (measured):** arm-G's whole ~1.4s is engineering-closable execution; a persistent toolchain
+  reaches the sub-100ms substrate floor. Warm-render demonstrated one leg.
+
+**Remaining legs (mapped, but PRODUCT polish — same pattern, off the thesis critical path):**
+- `fram-edit-code` lazy-load (~336ms→~100ms): the same proven render fix, BUT it's paren-surgery on the
+  heavily-used `:edit-min` hot authoring path → real breakage risk for modest gain. Deferred (do it carefully
+  when not under speed pressure, or via a full-section rewrite + verify).
+- Persistent beagle process (~645ms recompile startup) + persistent racket renderer (~263ms): **cross-lane
+  (beagle)** — bigger builds, need a `claims/beagle-*` claim + coordination.
+
+**Judgment (the spec's diminishing-returns call, which it reserves for Tom):** TRACK B's *thesis* value —
+"arm-G latency is execution, not substrate, and it's closable" — is delivered + measured + one win
+demonstrated. The remaining optimizations are MORE of the same pattern (eliminate process startup); they'd
+confirm, not change, the conclusion, and they're either risky-on-hot-path or cross-lane. This is the natural
+diminishing-returns boundary for TRACK B's contribution to the experiment/talk. The optimizations remain real
+*product* value (faster Fram to use) if pursued as a separate track.
+
