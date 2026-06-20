@@ -218,3 +218,41 @@ either — namespacing closes it on the text side. Options, Tom/advisor's call:
   building the graph arm with hand-asserted identity AND honestly handling over-rename; weaker + contestable.
 - **Do NOT build the graph arm until (i)/(ii) is chosen** — building the favorable arm before the claim is
   settled is the anti-Edison failure again.
+
+## FINAL VERDICT (2026-06-20, advisor decision relayed) — (i) chosen, (ii) DEAD, analyzer-Tier-2 closed
+**Decision: (i).** The talk stands on **Tier-1 (the structural guarantee) + the substrate/addressing
+argument**, with the measured clojure-lsp refusal as a concrete *illustration* (the incumbent's own "only
+namespaced keywords can be renamed" = no-identity ⇒ no-safe-rename). **(ii) is DEAD, not deferred** — do not
+build the graph arm to chase it.
+
+**Why (ii) collapses — the value-is-spelling dilemma.** A Clojure keyword's spelling IS its value; there is no
+display-name separate from identity, so a rename changes the value by exactly as much as namespacing does.
+Case-split the residual:
+- **`:self` is a wire contract** → NO rename is safe for anyone (graph or text): any rename changes what's on
+  the wire. The graph only buys keeping `:self` on the wire and skinning a friendly name over it — that is
+  *aliasing* (graphify-flavored comprehension color), with no text analog, NOT the rename op arm-LSP performs.
+- **`:self` is internal** → the idiomatic fix is to namespace it, and clojure-lsp renames it completely (that
+  IS Control B).
+Both horns land in the same place: **no graph-renames-where-lsp-cannot.** The residual is the honeysql null in
+a third costume.
+
+**The generalization (the real payload) — analyzer-based Tier-2 is structurally closed.** Two independent
+targets converge, and with the resolver read it generalizes. CONFIRMED by direct read (not asserted):
+`refers_to` is a **surface lexical walk over UNEXPANDED forms** — the beagle projection is `read-beagle-syntax`
+→ `syntax->datum` → `datum->claims` (claims-roundtrip.rkt:502-505; `syntax->datum` = surface reader datum,
+zero macroexpand), `parse.rkt` has no expand/macroexpand/namespace-require, and `resolve.clj`'s walk has none
+either (the only "expand" is a comment, :770). So the graph sees **exactly the reference classes lsp sees and
+no others** — symbols, keywords (qualified or not), and is blind to post-expansion refs *equally with lsp*
+(both surface analyzers). **There is no reference class the graph computes that lsp lacks.** Every
+analyzer-based Tier-2 (a measured miss) is therefore closed across all three classes: symbol (honeysql),
+keyword (datahike), macro (unexpanded-surface, confirmed). The miss-hunt ends here, cleanly.
+
+**What the substrate advantage actually is: entirely Tier-1 structural** (demonstrated, not benchmarked) — O(1)
+re-point on rename, no false-hits in strings/comments by construction, and a durable slot for an edge text has
+nowhere to keep. Real, but not a measured-miss.
+
+**The only measured empirical content left** is the **cost curves under a real refactor with full per-layer
+attribution** (MCP vs render vs daemon vs graph-algorithm) — a different axis from the miss now ruled out
+twice, and the place the attribution discipline actually bites. *Loop-spec implication (for when we return to
+the three locks):* a loop built to hunt a Tier-2 rename miss would hunt forever; the loop **measures cost
+curves and demonstrates the Tier-1 guarantee at scale — it does not search for a win.**

@@ -4,12 +4,15 @@ For Tom + advising agents. Where the RacketCon concurrent-authoring experiment s
 that need a human/advisor decision. Receipts referenced here all live in this directory.
 
 ## TL;DR
-The mechanism is proven, the measurement method is built + validated + honest, and we have one real
-measured datapoint (N=1). The **one load-bearing open decision is the Tier-2 target**: honeysql (current
-corpus) can show *mechanism-at-scale* and is a *beagle-hardening goldmine*, but it **cannot produce a
-measured Tier-2 divergence** — its symbols are plain/static, so the best text tool (clojure-lsp) catches
-every reference. A measured Tier-2 number needs a different target. Everything else — the frame, the arms,
-agent coordination, the beagle entanglement — is resolved.
+The mechanism is proven, the measurement method is built + validated + honest, and we have one real measured
+datapoint (N=1). **The Tier-2-target decision is now RESOLVED (2026-06-20): there is NO clean analyzer-based
+Tier-2 miss — it is structurally closed.** Two independent targets (honeysql symbols, datahike keywords) plus
+a CONFIRMED-unexpanded-surface resolver read prove the graph sees exactly the reference classes clojure-lsp
+sees and no others (symbol/keyword/macro alike). So the talk stands on **Tier-1 (the structural guarantee) +
+the substrate/addressing argument**, with clojure-lsp's own "only namespaced keywords can be renamed" refusal
+as a Tier-1 *illustration*. The substrate advantage is entirely Tier-1 structural; **the only measured
+empirical content left is the cost curves with per-layer attribution** (MCP vs render vs daemon vs graph
+algorithm). The miss-hunt is over; next measured work is the curves, not a graph-beats-lsp rename.
 
 ## What the experiment measures
 Does authoring code as a **claim graph** (identity addressing) beat authoring it as **text**, under
@@ -61,7 +64,17 @@ foreign language changes the runtime and collapses the control.)
 
 ## OPEN DECISIONS — need your / associates' input
 
-**1. (DIRECTION SET by advisor 2026-06-20; precondition gate now RESOLVED — see `TIER2-PRECONDITION-VERDICT.md`) The Tier-2 target.**
+**1. (RESOLVED 2026-06-20 — see `TIER2-PRECONDITION-VERDICT.md` "FINAL VERDICT") The Tier-2 target.**
+**Decision: (i).** Talk stands on **Tier-1 + the substrate/addressing argument**; the measured clojure-lsp
+refusal is a Tier-1 *illustration* ("only namespaced keywords can be renamed" = no-identity ⇒ no-safe-rename),
+NOT a benchmarked Tier-2. **(ii) is DEAD** (value-is-spelling dilemma: a keyword's spelling IS its value, so a
+wire-contract keyword is unrenameable for everyone and an internal one is namespaced+lsp-renamed = Control B;
+no graph-renames-where-lsp-cannot). **Analyzer-based Tier-2 is structurally closed across symbol/keyword/macro**
+(refers_to is a CONFIRMED unexpanded-surface lexical walk → same reference classes as lsp, no more). The
+substrate advantage is **entirely Tier-1 structural**; the only measured empirical content left is **cost
+curves with per-layer attribution**. The miss-hunt is over. Historical detail of the path is below.
+
+_(superseded — kept for the trail):_
 **Do BOTH, but FLIP the priority:** (b) — a *measured miss* by clojure-lsp on a dynamic/macro ref — is the
 talk's **empirical payload** (the thing that moves a skeptical PL room: watch lsp silently miss a ref the
 graph catches). honeysql is **supporting work, NOT the Tier-2 result**: a mechanism-demo + a cost-curve,
