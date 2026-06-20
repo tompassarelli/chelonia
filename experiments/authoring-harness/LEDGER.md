@@ -326,3 +326,37 @@ Tom adjudicated the scope fork: **(B)** — the divergence question is answered 
 - Classification: arm-LSP measured-with-config; arm-G measured-small-N + mechanism; verdict
   argued-from-measured-data at honest weight.
 
+---
+
+## TRACK B — OPTIMIZATION (measurement-first)
+
+### S-TRACKB-DECOMP (2026-06-20T18:40Z) — arm-G latency = COLD per-invocation rebuilds, not substrate/typing-tax
+TRACK B item-1 measurement: decompose arm-G's execution layers (warm, repeatable). Self-corrected twice
+(distrust-the-number working): (1) guessed "~4s build-all overhead" → WRONG (build-all warm = `beagle build` =
+~645ms, dialect- AND size-insensitive: greet 17 lines ≈ query 289 lines); (2) the S-GREET "~5000ms recompile"
+was a **COLD racket .zo-cache artifact** — WARM recompile = ~645ms = beagle PROCESS STARTUP (racket load),
+size-insensitive → typed-compile WORK is negligible (corrects S-GREET's "typing tax" label). bb startup ≈ 21ms
+(negligible), so edit/render are NOT bb-bound — they're the scripts' own work.
+
+| layer | warm cost | what it actually is | optimization |
+|---|---|---|---|
+| graph op (daemon `:edit-min`) | sub-ms | the rename itself | — already at the substrate floor |
+| edit (fram-edit-code) | ~330ms | bb(21) + daemon socket roundtrip + client processing | persistent edit-client |
+| render (fram-render-code) | ~1.8s | bb(21) + **COLD resolver rebuild from the log** (does NOT use the warm daemon) | **warm render via the daemon** ← biggest win |
+| recompile (beagle-build-all) | ~645ms | beagle racket PROCESS STARTUP (size/dialect-insensitive) | persistent beagle process |
+| typing tax (parse+check+emit) | negligible | — | (incremental-typecheck = LOW value → DEMOTED) |
+
+**TRACK B headline (measured):** arm-G's latency is **cold per-invocation rebuilds** — render rebuilds the
+resolver from the log (~1.8s), beagle reloads racket (~645ms) — **NOT substrate cost and NOT typing tax**
+(both tiny/sub-ms). The daemon already warms the graph state; render just doesn't read it. **Warming the
+per-invocation paths drives arm-G toward the substrate floor** (the graph op is already sub-ms). This is the
+measured backing for "the graph pays tooling/STARTUP latency, not substrate latency — engineering-closable."
+
+**Build priorities (measurement-driven, reorders LOOP-SPEC v2):**
+1. **Warm render via the daemon** (~1.8s → ~ms) — fram-side (my lane); the daemon holds the warm store,
+   render should be served off it (as `:callers` already is). Biggest single win, no beagle dependency.
+2. **Persistent beagle process** (~645ms startup) — keep beagle resident, serve builds warm.
+3. Persistent edit-client (~310ms).
+4. **DEMOTED: incremental typecheck (v2 item 2)** — typing tax measured negligible at module scale.
+**Next build: warm render via the daemon (item 1, fram-side).** Classification: measured-with-config.
+
