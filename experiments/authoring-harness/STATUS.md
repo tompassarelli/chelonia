@@ -70,7 +70,9 @@ refusal is a Tier-1 *illustration* ("only namespaced keywords can be renamed" = 
 NOT a benchmarked Tier-2. **(ii) is DEAD** (value-is-spelling dilemma: a keyword's spelling IS its value, so a
 wire-contract keyword is unrenameable for everyone and an internal one is namespaced+lsp-renamed = Control B;
 no graph-renames-where-lsp-cannot). **Analyzer-based Tier-2 is structurally closed across symbol/keyword/macro**
-(refers_to is a CONFIRMED unexpanded-surface lexical walk → same reference classes as lsp, no more). The
+(refers_to is a CONFIRMED unexpanded-surface lexical walk → same reference classes as lsp, no more — scoped to
+the CURRENT implementation, not a theorem: a graph that materialized post-expansion refs would see more; the
+honest claim is "the graph AS BUILT sees text's classes," not "a graph can never compute more"). The
 substrate advantage is **entirely Tier-1 structural**; the only measured empirical content left is **cost
 curves with per-layer attribution**. The miss-hunt is over. Historical detail of the path is below.
 
