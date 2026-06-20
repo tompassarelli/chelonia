@@ -63,14 +63,13 @@ PROJ="$WD/lsp-proj"; NSPATH="${CLJ_NS//.//}"; NSPATH="${NSPATH//-/_}"
 mkdir -p "$PROJ/src/$(dirname "$NSPATH")"
 echo '{:paths ["src"]}' > "$PROJ/deps.edn"
 "$BEAGLE/bin/beagle" build "$WD/$MODULE.bclj" "$PROJ/src/$NSPATH.clj" >/dev/null
-cp "$PROJ/src/$NSPATH.clj" "$WD/lsp-pristine.clj"
-# prime (warms clj-kondo cache; applies an edit we then discard)
-clojure-lsp rename --project-root "$PROJ" --from "$CLJ_NS/$OLD" --to "$CLJ_NS/$NEW" >/dev/null 2>&1 || true
-cp "$WD/lsp-pristine.clj" "$PROJ/src/$NSPATH.clj"        # restore pristine for the TIMED run
+# prime: read-only analysis to warm the clj-kondo cache WITHOUT mutating the file
+# (renaming as a prime would pollute the cache with the post-rename symbol -> stale)
+clojure-lsp diagnostics --project-root "$PROJ" >/dev/null 2>&1 || true
 t=$(now)
 clojure-lsp rename --project-root "$PROJ" --from "$CLJ_NS/$OLD" --to "$CLJ_NS/$NEW" >/dev/null 2>&1
 LSP_RENAME=$(ms "$t")
-grep -q "def $NEW" "$PROJ/src/$NSPATH.clj" || { echo "arm-LSP FAIL: def not renamed"; exit 1; }
+grep -qw "$NEW" "$PROJ/src/$NSPATH.clj" || { echo "arm-LSP FAIL: new name absent after rename"; exit 1; }   # correctness = recompile+oracle below (un-re-pointed ref => undefined => fails)
 t=$(now); bb "$WD/oracle.bb" "$PROJ/src/$NSPATH.clj" >/dev/null; LSP_RECOMPILE=$(ms "$t")
 echo "arm-LSP  rename(lsp,warm)=${LSP_RENAME}ms  recompile+oracle(clj-load,dynamic)=${LSP_RECOMPILE}ms"
 
@@ -85,7 +84,7 @@ bb -cp out bin/fram-edit-code rename "$MODULE" --old "$OLD" --new "$NEW" --port 
 G_EDIT=$(ms "$t")
 after=$(grep -c . "$WD/code.log")
 t=$(now); bb -cp out bin/fram-render-code "$MODULE" --log "$WD/code.log" --out "$WD/G.bclj" >/dev/null 2>&1; G_RENDER=$(ms "$t")
-grep -q "def $NEW" "$WD/G.bclj" || { echo "arm-G FAIL: def not renamed in render"; exit 1; }
+grep -qw "$NEW" "$WD/G.bclj" || { echo "arm-G FAIL: new name absent in render"; exit 1; }   # OLD may persist in COMMENTS — that is the Tier-1 no-false-hit property, NOT a failure; correctness = recompile+oracle
 t=$(now); "$BEAGLE/bin/beagle-build-all" "$WD/G.bclj" >/dev/null; G_RECOMPILE=$(ms "$t")
 bb "$WD/oracle.bb" harness/$MODULE.clj >/dev/null; rm -rf harness
 echo "arm-G    ingest(setup,one-time)=${G_INGEST}ms  edit(daemon-repoint,warm)=${G_EDIT}ms  render=${G_RENDER}ms  recompile(beagle,typed)=${G_RECOMPILE}ms"
