@@ -178,3 +178,34 @@ win never leaks into the substrate column.
 **Thread settled. Loop still HALTED.** Open question unchanged + Tom's: large-N divergence (porting), now
 joined by an optional product track (knobs above).
 
+### S-PIN-DURABILITY (2026-06-21) — do the pins survive intervening edits? (load-bearing follow-up)
+The 3-rename test had nothing BETWEEN renames, so it only proved pins survive back-to-back renames. The
+"O(1) forever" claim needs pins to survive the edits (body changes, re-renders, other edits) that each
+trigger the daemon's scoped re-resolve. Tested: install pins, disturb with unrelated edits, re-rename, watch Δ.
+
+Sequence (pins for one binding installed, then stressed):
+- rename#1 vars-of->vars-set:      Δ=6, pins 4 refs -> `@query#166`
+- intervene rename max-results:    Δ=5, pins 3 refs -> `@query#1815` (its OWN binding); **#166 NOT re-pinned**
+- intervene rename strata-of:      Δ=4, pins -> `@query#402`;  #166 untouched
+- intervene rename term-ok?:       Δ=4, pins -> `@query#132`;  #166 untouched
+- intervene re-render query:       **Δ=0** (pure read — projection writes nothing to the log)
+- rename#2 vars-set->vars-final:   **Δ=2, zero new bound_to** — O(1) AFTER all the intervening edits
+
+**MEASURED:** pins on UNTOUCHED references are DURABLE across arbitrary re-resolve-triggering edits. The
+scoped re-resolve is **pin-preserving + idempotent (skip-if-pinned)**: each edit pins only ITS OWN
+newly-affected refs, never re-touching already-pinned ones. Re-render is read-only (Δ=0). The re-rename is
+O(1) even after a burst of intervening edits. So "amortized O(1)" is **O(1) for the life of the binding's
+references**, not the narrow "O(1) only across back-to-back renames."
+
+**BOUNDARY (argued from node-identity architecture; the one corner not directly measured):** an edit that
+REPLACES a reference's containing body (set-body/upsert-form on a def that references the binding) mints a NEW
+reference node, which is unpinned and gets re-pinned on the next rename. That is correct identity semantics (a
+rewritten reference IS a new identity); the cost is bounded by references-you-edited, NOT a re-pin of
+untouched refs, and it does not reopen "pay N again" for the stable references. Cheap follow-up to convert to
+measured: set-body a referencing defn, rename, confirm only the rewritten ref re-pins. Flagged honestly, not
+asserted-as-measured.
+
+**Net:** the O(1)-forever claim SURVIVES for untouched references (the common case) — make it loud; state the
+edited-reference boundary honestly. The write-side story is now "graph slower exactly ONCE (lazy identity
+install), then faster and correct," measured + durable, not "graph slower but correct."
+
