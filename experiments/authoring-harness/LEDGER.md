@@ -263,3 +263,39 @@ NOT committed to the MIT fram repo); recipe in this entry.
 util/str's 239 refs live) under its full test suite; (3) arm-G rename util/str at N=239, compare per-ref cost
 vs arm-LSP's ~3.1ms/ref. Classification: measured-with-config (gate green).
 
+### S-PORT-HONEYSQL-FEASIBILITY (2026-06-20T18:10Z) — honey.sql core port = a multi-session beagle marathon
+Attempted the honey.sql core port (the module with util/str's 239 refs — needed for a CLEAN module-size-constant
+high-N arm-G curve; a synthetic high-N module reintroduces the module-size/N confound, so it must be real
+honey.sql). Mapped the gaps precisely by probing beagle:
+
+| construct in honey.sql | count | beagle? | path |
+|---|---|---|---|
+| `:refer-clojure :exclude` | 1 (ns) | NO (parser) | shadow works without it (warns); strip the form |
+| `^:private` defn metadata | 36 | NO (parser: "expected parameter list") | **build** parser support, or strip (private→public, fidelity note) |
+| reader "unexpected ]" in body | ≥1 | NO (reader) | UNLOCATED in the 2800-line body — needs locating |
+| `extend-protocol` | 1 | NO (combiner) | rewrite → `extend-type` (supported), or build |
+| multi-arity anon fn (`fn-multi`) | 2 | NO (gjoa's (d) rejection) | stopgap via `completing`, or **build** (mine) |
+| `defmacro formatv` | 1 | supported? | test; drop if untested by sql_test |
+| `clojure.template` (clj require) | 1 | clj-only | drop if formatv dropped |
+| regex `#"..."`, `@deref`, `#{}` sets, `'sym`, reader-cond | many | **OK** (probed) | fine |
+| + a full 2858-line type-check pass + multi-module resolution (util+protocols+sql) + the full honeysql sql_test gate | | | the long tail |
+
+**Honest scope:** this is NOT a quick port. It is a multi-session effort: build/strip several beagle features
+(^:private, fn-multi, extend-protocol, the body reader gap) + a 2858-line typecheck + multi-module build +
+pass honeysql's full sql_test. **DUAL VALUE** (why it's not wasted): (a) the large-N arm-G datapoint, and (b)
+it is a genuine **beagle stress-test** — every gap fixed is a real upstream contribution (the spec: "this
+experiment is Beagle's best stress test... that IS the work").
+
+**The scope fork (surfaced to Tom per the v2 halt rule — Tom adjudicates diminishing returns):**
+- (A) **Fund the marathon:** grind the honey.sql port, fixing each gap as a real beagle upstream fix
+  (^:private, fn-multi, extend-protocol, reader gap) on `fram/honeysql-beagle`. Yields the clean high-N
+  curve + hardens beagle. Multi-session.
+- (B) **Accept the mechanism-established answer:** arm-G's per-ref rename cost is O(1) op + O(N) bound_to
+  install measured *cheap* (sub-ms each) at N=1-4 (S-QUERY-CURVE); arm-LSP's is ~3.1ms/ref (S-LARGE-N-LSP).
+  By mechanism + small-N measurement the graph is favored on the per-ref axis; a measured N=239 point would
+  *confirm* not *change* it. Cheaper; less ecologically complete.
+- **My default (per "keep working"): (A)** — grind it, because the beagle-hardening is independently valuable
+  and the spec prioritizes it. Starting with the parser gaps (^:private, then the body reader gap) as real
+  fixes on my branch. Tom can redirect to (B) if the marathon isn't worth the session budget.
+**Classification:** argued (feasibility), not yet measured. util port remains the one GREEN gated port.
+
