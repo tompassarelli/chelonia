@@ -1,7 +1,0 @@
-cal	0	live	2	yes	TIE conceded (grep is one op too)
-a	1	live	1	yes	caller MODULE SET {kernel,main,tools} from op-1 alone — 1-vs-1 TIE, conceded
-b	1	live	2	yes	one binding + 3 spellings (39/29/6=74), convergence proven
-c	k	layer-A-only	9	yes	frontier-batched BFS over 7-member closure (4 search + 5 read); graph cost=1 HYPOTHETICAL
-d	1	layer-A-only	3	yes	SOURCE: 41 sites (20+21); graph cost=1 HYPOTHETICAL
-d-lowered	1	layer-A-only	1	NO (erased)	SOURCE-UNAVAILABLE: (Vec Claim) erases to 0 -> text FAILS the generic question
-e	k	edit	1read+sed+verify	oracle	EDIT-cost; isolated-sed parity CONCEDED; oracle = beagle-build-all 0 errors

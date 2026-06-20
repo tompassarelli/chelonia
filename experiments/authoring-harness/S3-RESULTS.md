@@ -12,8 +12,8 @@ arg (real call structure), plus the `*html-mode*` dynamic var. Adaptation: hiccu
 protocol; here it's a String-typed helper (`to-str` of a string IS the string → behavior-preserving
 for `test-escaped-chars`, which only passes strings). **Both Beagle arms start from the IDENTICAL
 ported `util.bclj`**, so the adaptation is a shared baseline and CANCELS in the Beagle-text vs
-Beagle-graph (crown-jewel) comparison. Adaptation is only an asymmetry for the Clojure-text arm —
-flagged there, never in the crown jewel. Oracle = hiccup's `test-escaped-chars`, verbatim (7 asserts
+Beagle-graph comparison. Adaptation is only an asymmetry for the Clojure-text arm —
+flagged there, never in the core comparison. Oracle = hiccup's `test-escaped-chars`, verbatim (7 asserts
 incl. the dynamic `binding [*html-mode* :sgml]` case).
 
 ## Portability (empirically mapped; corrected 3 premature wrong reads via `beagle check` probes)

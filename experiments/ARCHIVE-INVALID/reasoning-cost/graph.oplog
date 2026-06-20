@@ -1,3 +1,0 @@
-gq callers kernel thread-ids-i
-gq callers-te @import#398
-gq query {:find "vq" :rules [{:head {:rel "vq" :args [{:var "vid"}]} :body [{:rel "triple" :args [{:var "vid"} "v" "var?"]}]}]}

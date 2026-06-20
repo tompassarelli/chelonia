@@ -1,9 +1,0 @@
-2026-06-19T02:58:00.302Z	search	thread-ids-i
-2026-06-19T02:58:00.314Z	read	/tmp/reasoning-cost-text.SWVlkI/src/fram/kernel.bclj 254:267
-2026-06-19T02:58:00.325Z	read	/tmp/reasoning-cost-text.SWVlkI/src/fram/main.bclj 74:100
-2026-06-19T02:58:00.337Z	read	/tmp/reasoning-cost-text.SWVlkI/src/fram/tools.bclj 214:239
-2026-06-19T02:58:00.348Z	search	(cmd-export|cmd-validate|work-thread-ids-i|\bcall\b)
-2026-06-19T02:58:00.362Z	read	/tmp/reasoning-cost-text.SWVlkI/src/fram/main.bclj 252:302
-2026-06-19T02:58:00.373Z	search	(\bdispatch\b|cmd-call)
-2026-06-19T02:58:00.385Z	read	/tmp/reasoning-cost-text.SWVlkI/src/fram/main.bclj 322:323
-2026-06-19T02:58:00.396Z	search	\-main

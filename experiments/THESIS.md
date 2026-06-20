@@ -1,6 +1,6 @@
 # THESIS — the actual claim, and the only test that can prove it
 
-> Read this FIRST, before any experiment doc. It outranks anything in `ARCHIVE-INVALID/`.
+> Read this FIRST, before any experiment doc. It outranks any other experiment write-up.
 
 ## The claim
 The graph is the **canonical source of truth** — *not* derived from text — and that uniquely enables
@@ -33,7 +33,7 @@ A coordination experiment is meaningless until the graph is actually canonical. 
    it isn't flipped.*
 
 Until the flip is real, **NO experiment tests the thesis.** Anything claiming otherwise is testing
-graphify. (See `ARCHIVE-INVALID/INVALID.md` for the artifacts that made exactly that mistake.)
+graphify — a warm index over text gives the same query speed and proves nothing unique to a canonical graph.
 
 ## Validity-scope habit (so this never happens again)
 Every experiment output must state at the TOP what it does and does NOT prove — e.g. "this tests X;
