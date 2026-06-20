@@ -102,7 +102,7 @@
 (defn- parse-args [args]
   (loop [a (drop 2 args)
          opts {:op (first args) :module (second args)
-               :port nil :log nil :out nil :no-commit false
+               :port nil :log nil :out nil :no-commit false :whole-module false
                :old nil :new nil :name nil :body-file nil :spec-file nil}]
     (cond
       (empty? a) opts
@@ -110,6 +110,9 @@
       (= "--log" (first a)) (recur (drop 2 a) (assoc opts :log (second a)))
       (= "--out" (first a)) (recur (drop 2 a) (assoc opts :out (second a)))
       (= "--no-commit" (first a)) (recur (rest a) (assoc opts :no-commit true))
+      ;; opt OUT of the minimal-op path back to the legacy cold-boot whole-module
+      ;; render+diff+commit (the ~7800-op baseline). Default is the minimal path.
+      (= "--whole-module" (first a)) (recur (rest a) (assoc opts :whole-module true))
       (= "--old" (first a)) (recur (drop 2 a) (assoc opts :old (second a)))
       (= "--new" (first a)) (recur (drop 2 a) (assoc opts :new (second a)))
       (= "--name" (first a)) (recur (drop 2 a) (assoc opts :name (second a)))
@@ -117,13 +120,71 @@
       (= "--spec-file" (first a)) (recur (drop 2 a) (assoc opts :spec-file (second a)))
       :else (recur (rest a) opts))))
 
-(let [{:keys [op module port log out no-commit old new name body-file spec-file]} (parse-args the-args)
+;; one-shot EDN request to the live coordinator daemon (the SAME wire fram-commit-code
+;; uses). Returns the parsed reply map.
+(defn- coord-rt [port req]
+  (with-open [s (java.net.Socket.)]
+    (.connect s (java.net.InetSocketAddress. "127.0.0.1" (int port)) 2000)
+    (let [w (io/writer (.getOutputStream s)) rd (io/reader (.getInputStream s))]
+      (.write w (str (pr-str req) "\n")) (.flush w)
+      (edn/read-string (.readLine rd)))))
+
+(let [{:keys [op module port log out no-commit whole-module old new name body-file spec-file]} (parse-args the-args)
       log-path (or log (str (System/getProperty "user.dir") "/.fram/code.log"))]
-  (when (str/blank? op) (die "usage: bin/fram-edit-code <op> <module> [verb args] --port <P> [--log <code.log>] [--out <file>] [--no-commit]"))
+  (when (str/blank? op) (die "usage: bin/fram-edit-code <op> <module> [verb args] --port <P> [--log <code.log>] [--out <file>] [--no-commit] [--whole-module]"))
   (when (str/blank? module) (die "module is required (the @<mod># prefix to edit, e.g. schema)"))
   (when-not (.exists (io/file log-path)) (die "no code log at" log-path "(run bin/fram-ingest-code first)"))
   (when (and (not no-commit) (nil? port)) (die "--port <P> is REQUIRED unless --no-commit"))
 
+  ;; ==========================================================================
+  ;; MINIMAL-OP PATH (DEFAULT) — commit the verb's EXACT mint/supersede ops via
+  ;; the LIVE warm daemon's :edit-min wire op. NO cold migrate-flat->co boot, NO
+  ;; render->emit-edn->whole-module-diff. A 1-line set-body = a HANDFUL of ops, and
+  ;; two disjoint same-module edits COMMUTE (they touch disjoint (te,p) groups).
+  ;; Taken whenever we are committing (port given) and --whole-module was NOT set.
+  ;; ==========================================================================
+  (when (and port (not no-commit) (not whole-module))
+    (let [spec (case op
+                 "rename"      (do (when (or (str/blank? old) (str/blank? new))
+                                     (die "rename needs --old <name> --new <name>"))
+                                   {:op "rename" :module module :old old :new new})
+                 "set-body"    (do (when (or (str/blank? name) (str/blank? body-file))
+                                     (die "set-body needs --name <defn> --body-file <edn>"))
+                                   (when-not (.exists (io/file body-file)) (die "no body file:" body-file))
+                                   {:op "set-body" :module module :name name
+                                    :datum (edn/read-string (slurp body-file))})
+                 "upsert-form" (do (when (str/blank? spec-file) (die "upsert-form needs --spec-file <edn>"))
+                                   (when-not (.exists (io/file spec-file)) (die "no spec file:" spec-file))
+                                   {:op "upsert-form" :module module
+                                    :datum (edn/read-string (slurp spec-file))})
+                 (die "unknown op:" op "(rename | set-body | upsert-form)"))]
+      ;; SAFETY GATE: refuse unless the daemon serves a CODE log (never lodestar).
+      (let [st (coord-rt port {:op :status}) daemon-log (str (:log st))]
+        (when (str/blank? daemon-log) (die "coordinator on" port "reports no :log — refusing"))
+        (when-not (str/includes? daemon-log "code.log")
+          (die "SAFETY: coordinator on" port "serves" daemon-log "— NOT a *code.log; refusing"))
+        (let [resp (coord-rt port {:op :edit-min :spec spec})]
+          (if (:ok resp)
+            (do (log! (str "fram-edit-code: MINIMAL-OP " op " on " module
+                           " — committed " (:ops resp) " ops (" (:asserts resp) " assert / "
+                           (:retracts resp) " retract; " (:new-nodes resp) " new node(s)) "
+                           "THROUGH the live daemon (NOT whole-module). version -> " (:version resp)))
+                ;; the log is canonical; if --out was asked, render the module from the
+                ;; now-updated daemon log so the caller still gets a .bclj view.
+                (when out
+                  (let [r (proc/sh {:err :string :extra-env (into {} (System/getenv))}
+                                   "bb" "-cp" fram-out (str bin-dir "/fram-render-code")
+                                   module "--log" daemon-log "--out" out)]
+                    (when (zero? (:exit r)) (log! "fram-edit-code: rendered" module "->" out))))
+                (println (or out (str "@" module " committed via :edit-min")))
+                (System/exit 0))
+            (die "fram-edit-code: :edit-min REJECTED —" (pr-str resp)))))))
+
+  ;; ==========================================================================
+  ;; LEGACY path: --no-commit render-only, OR --whole-module commit (the baseline).
+  ;; Cold-boots a store from the log in-process (kept for the render-gate pre-step
+  ;; and for explicit whole-module-diff comparison).
+  ;; ==========================================================================
   ;; build the verb spec from the op-specific flags.
   (let [spec (case op
                "rename"      (do (when (or (str/blank? old) (str/blank? new))
