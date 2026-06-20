@@ -65,7 +65,7 @@
         ins (client port {:op :edit-min :spec {:op "upsert-form" :module "kernel"
                                                :datum (list 'def (symbol (str base i)) i)}})
         t-write (nowns)                                ; commit returns; store eager-updated
-        _ (:claims (client port {:op :status}))        ; B's read (corpus-from-store)
+        _ (:version (client port {:op :version-free}))  ; B's read — O(1) LOCK-FREE version (off the dlock; isolates true propagation)
         t-vis (nowns)]
     {:landed (boolean (:ok ins)) :write (ms t0 t-write) :prop (ms t-write t-vis)}))
 

@@ -68,3 +68,48 @@ propagation reported separately (v1 conflated them — fixed).
 - Net: the substrate's bet — pay at write to make reads/propagation cheap and
   contention-resistant — shows up exactly here. Honest column where graph loses (write)
   reported alongside where it wins (propagation under concurrency).
+
+## Measurement refinement → the clean result
+
+The first K-sweep "graph propagation climbs 4.8x" was contaminated by TWO stacked
+measurement artifacts in the read path, peeled off one at a time:
+
+1. **Whole-corpus read.** B's read was `:status`, which counts the full ~78k-claim
+   corpus every call (~40ms). Swapping to the O(1) `:version` dropped graph-prop from
+   41ms to ~1ms at K=1, but it still climbed (1→35ms) because...
+2. **Read coupled to the writer lock.** `:version`/`:status` run under the outer
+   `dlock`, so K concurrent readers serialize behind the writers. Added a lock-free
+   read op (`:version-free`, derefs the immutable `@co` snapshot, no dlock).
+
+With the lock-free read (ms, mean):
+
+| K | git-write | git-prop | graph-write | graph-prop |
+|---|----------:|---------:|------------:|-----------:|
+| 1 | 22.4 | 51.4 | 412.9* | 1.1 |
+| 2 | 27.1 | 81.7 | 148.4 | 1.1 |
+| 4 | 39.3 | 146.4 | 175.2 | 1.1 |
+| 8 | 80.2 | 361.8 | 204.8 | 1.2 |
+
+`*` K=1 graph-write is JIT warmup; warm graph-write is ~175ms, ~flat in K.
+
+**The clean result (pre-registration confirmed):**
+- **graph propagation is FLAT** at ~1.1ms across K=1..8 (P1 holds). The earlier climb was
+  100% the read artifacts, not a substrate property. Writes are eager, the reader reads an
+  immutable snapshot lock-free, so a reader sees a commit in constant time regardless of
+  how many agents are writing.
+- **git propagation climbs 51→362ms** (7x, P2 holds) as pushes serialize through the
+  shared ref's non-ff check → fetch+merge+retry (the merge-queue).
+- **write flat both-ish**: graph ~175ms (eager index), git 22→80ms. The mirror cost.
+- `landed = K/K` both arms — no lost writes.
+
+**This is a substrate result, not an implementation one.** Concurrent disjoint writes do
+not collide (write column flat, not climbing), and a reader observes them in constant time
+(prop flat). git's propagation climbs because the shared ref forces serialization. The
+distinction matters: the win is the data structure (commuting writes + eager immutable
+snapshot), not "our daemon happens to contend less."
+
+**Honest caveat:** the 1.1ms is the lock-free `:version` round-trip; visibility is
+eager-by-construction (commit swaps `@co` before `:edit-min` returns; version is
+monotonic), not asserted per-read against the specific def. A fair propagation proxy, not
+a targeted content check. Same disjoint-target corpus throughout; same-file overlap (git
+conflicts) is the #45 continuous-arrival follow-up.

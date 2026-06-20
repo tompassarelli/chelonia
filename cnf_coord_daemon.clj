@@ -1006,10 +1006,17 @@
   ;; and HIDES the concurrency the logic layer + the 150-pair commute already proved. maybe-reload!
   ;; is a no-op in v2-log mode (the code daemon, where :edit-min lives), so skipping it here is
   ;; safe; the commit still serializes under dlock and is OCC-checked per (te,p) at commit time.
-  (if (= :edit-min (:op req))
+  (cond
+    ;; LOCK-FREE read: deref the @co immutable snapshot, NO dlock. Reads don't need the
+    ;; writer lock (the atom swap on commit is atomic), so a reader never serializes behind
+    ;; concurrent writers. Used to measure true propagation (commit -> reader sees) without
+    ;; the read-coupled-to-writer-lock artifact the dlock-wrapped :version/:status have.
+    (= :version-free (:op req)) {:version (current-seq @co)}
+    (= :edit-min (:op req))
     (try (do-edit-min (:spec req))
          (catch Throwable t {:reject [(str "edit-min: " (.getMessage t))]
                              :version (current-seq @co)}))
+  :else
   (locking dlock                       ; serialize reload + writes + reads (drop-in mode)
     (maybe-reload!)                     ; absorb external flat edits (no-op in v2-log mode)
     (case (:op req)
