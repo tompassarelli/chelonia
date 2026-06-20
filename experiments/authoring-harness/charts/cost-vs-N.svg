@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="460" viewBox="0 0 720 460">
+<rect x="0.0" y="0.0" width="720.0" height="460.0" fill="#ffffff" stroke="none"/>
+<text x="78.0" y="26.0" font-family="Helvetica,Arial,sans-serif" font-size="16" text-anchor="start" fill="#222" font-weight="bold" font-style="normal">Rename cost vs N — within ONE module (size held constant): both arms FLAT</text>
+<text x="78.0" y="44.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#666" font-weight="normal" font-style="italic">experiments/authoring-harness/LEDGER.md · S-QUERY-CURVE · measured-with-config, warm</text>
+<text x="78.0" y="404.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="start" fill="#444" font-weight="normal" font-style="normal">Shows: within a fixed module (query.bclj, 10612-claim log), neither arm's rename wall-time grows</text>
+<text x="78.0" y="419.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="start" fill="#444" font-weight="normal" font-style="normal">with N — the pre-registered latency DIVERGENCE does not appear at small N (clojure-lsp's rename</text>
+<text x="78.0" y="434.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="start" fill="#444" font-weight="normal" font-style="normal">is itself ~O(1) here). Does NOT show: large N (next chart), nor that arm-G's ~3x-higher LEVEL is</text>
+<text x="78.0" y="449.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="start" fill="#444" font-weight="normal" font-style="normal">set by module/log SIZE, not by N.</text>
+<line x1="78.0" y1="56.0" x2="78.0" y2="364.0" stroke="#222" stroke-width="1.2"/>
+<line x1="74.0" y1="364.0" x2="692.0" y2="364.0" stroke="#d8d8d8" stroke-width="1"/>
+<line x1="74.0" y1="364.0" x2="78.0" y2="364.0" stroke="#222" stroke-width="1"/>
+<text x="70.0" y="368.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#555" font-weight="normal" font-style="normal">0</text>
+<line x1="74.0" y1="287.0" x2="692.0" y2="287.0" stroke="#d8d8d8" stroke-width="1"/>
+<line x1="74.0" y1="287.0" x2="78.0" y2="287.0" stroke="#222" stroke-width="1"/>
+<text x="70.0" y="291.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#555" font-weight="normal" font-style="normal">200</text>
+<line x1="74.0" y1="210.0" x2="692.0" y2="210.0" stroke="#d8d8d8" stroke-width="1"/>
+<line x1="74.0" y1="210.0" x2="78.0" y2="210.0" stroke="#222" stroke-width="1"/>
+<text x="70.0" y="214.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#555" font-weight="normal" font-style="normal">400</text>
+<line x1="74.0" y1="133.0" x2="692.0" y2="133.0" stroke="#d8d8d8" stroke-width="1"/>
+<line x1="74.0" y1="133.0" x2="78.0" y2="133.0" stroke="#222" stroke-width="1"/>
+<text x="70.0" y="137.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#555" font-weight="normal" font-style="normal">600</text>
+<line x1="74.0" y1="56.0" x2="692.0" y2="56.0" stroke="#d8d8d8" stroke-width="1"/>
+<line x1="74.0" y1="56.0" x2="78.0" y2="56.0" stroke="#222" stroke-width="1"/>
+<text x="70.0" y="60.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#555" font-weight="normal" font-style="normal">800</text>
+<text x="18" y="210.0" transform="rotate(-90 18 210.0)" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="middle" fill="#333" font-style="italic">rename wall-time (ms)</text>
+<line x1="78.0" y1="364.0" x2="692.0" y2="364.0" stroke="#222" stroke-width="1.2"/>
+<text x="78.0" y="382.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#555" font-weight="normal" font-style="normal">N=1</text>
+<text x="282.7" y="382.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#555" font-weight="normal" font-style="normal">N=2</text>
+<text x="487.3" y="382.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#555" font-weight="normal" font-style="normal">N=3</text>
+<text x="692.0" y="382.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#555" font-weight="normal" font-style="normal">N=4</text>
+<text x="385.0" y="402.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="middle" fill="#333" font-weight="normal" font-style="italic">references renamed (N)</text>
+<polyline points="78.0,284.7 282.7,284.3 487.3,283.9 692.0,285.1" fill="none" stroke="#3b6fb0" stroke-width="2.5"/>
+<circle cx="78.0" cy="284.7" r="3.5" fill="#3b6fb0"/>
+<circle cx="282.7" cy="284.3" r="3.5" fill="#3b6fb0"/>
+<circle cx="487.3" cy="283.9" r="3.5" fill="#3b6fb0"/>
+<circle cx="692.0" cy="285.1" r="3.5" fill="#3b6fb0"/>
+<polyline points="78.0,108.7 282.7,91.8 487.3,103.0 692.0,106.8" fill="none" stroke="#e08a3c" stroke-width="2.5"/>
+<circle cx="78.0" cy="108.7" r="3.5" fill="#e08a3c"/>
+<circle cx="282.7" cy="91.8" r="3.5" fill="#e08a3c"/>
+<circle cx="487.3" cy="103.0" r="3.5" fill="#e08a3c"/>
+<circle cx="692.0" cy="106.8" r="3.5" fill="#e08a3c"/>
+<text x="696.0" y="98.8" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#e08a3c" font-weight="bold" font-style="normal">arm-G edit ~668ms (flat)</text>
+<text x="696.0" y="277.1" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#3b6fb0" font-weight="bold" font-style="normal">arm-LSP rename ~206ms (flat)</text>
+<rect x="512.0" y="61.0" width="14.0" height="10.0" fill="#3b6fb0" stroke="none"/>
+<text x="532.0" y="70.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#222" font-weight="normal" font-style="normal">arm-LSP (clojure-lsp)</text>
+<rect x="512.0" y="79.0" width="14.0" height="10.0" fill="#e08a3c" stroke="none"/>
+<text x="532.0" y="88.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#222" font-weight="normal" font-style="normal">arm-G (graph daemon)</text>
+</svg>
