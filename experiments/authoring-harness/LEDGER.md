@@ -360,3 +360,24 @@ measured backing for "the graph pays tooling/STARTUP latency, not substrate late
 4. **DEMOTED: incremental typecheck (v2 item 2)** — typing tax measured negligible at module scale.
 **Next build: warm render via the daemon (item 1, fram-side).** Classification: measured-with-config.
 
+### S-TRACKB-WARMRENDER (2026-06-20T19:00Z) — BUILT + measured: warm render via daemon `:render` op
+Built TRACK B item 1. Added a `:render` wire op to `cnf_coord_daemon.clj` (fram-side, no beagle): it runs
+`ensure-refers!` (keep refers_to warm/scoped) then projects the module via `extract-file!` over the warm `@co`
+store, returning the resolved EDN — **skipping the cold `migrate-flat->co` (log fold) + `resolve-warm-store!`
+(whole-corpus walk)** the CLI path pays per invocation. Client racket --renders the EDN.
+
+**EXECUTION-LAYER RESULT (separate column — perceived latency, NOT a substrate/rename-cost number):**
+- cold `fram-render-code` (steady-state warm caches): **619ms**
+- warm `:render` op: **89ms** (warm projection) + racket --render **263ms** = **352ms total** → **~43% faster (~267ms saved).**
+- **CORRECTNESS: warm render is BYTE-IDENTICAL to cold render** (857 bytes, `cmp -s` ✓) — the optimization
+  changes latency, not output. (Also confirms the earlier "~1.8s render" was cold-cache; steady-state cold = 619ms.)
+- **Next bottleneck identified:** the remaining 352ms is the daemon op (89ms) + **racket --render startup
+  (263ms)**. The projection is cheap; racket process startup dominates → next win = a **persistent racket
+  renderer** (kill the 263ms), then warm render → ~90ms.
+
+**Attribution discipline held:** this is an EXECUTION optimization (cold-rebuild elimination). It does NOT
+touch the substrate claim and its warm-hit time is NEVER reported as the rename cost — kept in this separate
+TRACK B column. Classification: measured-with-config + correctness-verified (byte-identical).
+**Next:** persistent racket renderer (kill the 263ms), then wire `fram-render-code --port` to use `:render` by
+default; then persistent beagle (the ~645ms recompile startup).
+

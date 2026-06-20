@@ -1041,6 +1041,36 @@
       ;; the code version moved (the correct first cut); the reverse lookup is then a
       ;; by-pr/ultimate scan returning the set of [module, rendered-name] referencing
       ;; leaves. Target is {:te "@mod#id"} OR {:module .. :name ..}.
+      ;; :render — WARM render (TRACK B opt). The cold CLI path (fram-render-code) pays
+      ;; migrate-flat->co (log fold) + resolve-warm-store! (whole-corpus refers_to walk)
+      ;; per invocation (~1.8s). Served off `co` it skips BOTH: ensure-refers! keeps
+      ;; refers_to current (scoped), then project the module via extract-file! over the
+      ;; warm store and return the resolved EDN. The client racket --renders the EDN.
+      :render   (do (ensure-refers!)
+                    (let [st (:store @co) module (:module req)
+                          tmp (str (System/getProperty "java.io.tmpdir") "/fram-warmrender-" (System/nanoTime))
+                          _   (.mkdirs (java.io.File. ^String tmp))
+                          edn-out (str tmp "/resolved-" module ".bclj.edn")]
+                      (binding [resolve/ctx st
+                                resolve/tx (c/begin-tx! st "warm-render-read")
+                                resolve/Vp     (c/value-id st "v")
+                                resolve/KIND   (c/value-id st "kind")
+                                resolve/REFERS (c/value-id st "refers_to")
+                                resolve/FIXED  (c/value-id st "keep_spelling")
+                                resolve/QUAL   (c/value-id st "qualifier")
+                                resolve/CTOR   (c/value-id st "ctor_prefix")
+                                resolve/ACC    (c/value-id st "accessor_field")
+                                resolve/file->ents (atom {})
+                                resolve/srcs [] resolve/file-modframe {} resolve/file-typeframe {}
+                                resolve/file-accessors {} resolve/global-exports {}
+                                resolve/global-type-exports {} resolve/global-accessor-exports {}]
+                        (resolve/corpus-from-store!)
+                        (let [the-src (some #(when (= module %) %) resolve/srcs)]
+                          (if the-src
+                            (do (resolve/extract-file! the-src edn-out)
+                                {:edn (slurp edn-out) :module module :version (current-seq @co)})
+                            {:error "no such module in warm corpus" :module module
+                             :srcs (vec resolve/srcs) :version (current-seq @co)})))))
       :callers  (do (ensure-refers!)
                     (let [B (target-node req)]
                       (if B
