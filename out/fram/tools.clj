@@ -3,7 +3,7 @@
             [fram.query :as q]
             [clojure.string :as str]))
 
-(def Op-values #{::one ::many ::revfrom ::threads ::show ::dependents ::validate ::query ::set ::add ::remove ::upsert-form ::set-body ::rename-def})
+(def Op-values #{::one ::many ::revfrom ::threads ::show ::dependents ::validate ::query ::set ::add ::remove ::upsert-form ::set-body ::rename-def ::insert-after})
 
 (defrecord IdTitle [id title])
 
@@ -82,7 +82,7 @@
   (if (contains? seen nm) (recur (rest ss) seen out) (recur (rest ss) (conj seen nm) (conj out s)))))))
 
 (defn catalog [claims]
-  (let [structural [(->ToolSpec "threads" "List all threads (entities with a title) as {id,title}." [] :threads "") (->ToolSpec "show" "All claims about <id>." [(->Param "id" "string" true)] :show "") (->ToolSpec "dependents-of" "Threads that depend_on <id> (reverse depends_on)." [(->Param "id" "string" true)] :dependents "") (->ToolSpec "validate" "Structural integrity violations (cycles, dangling refs) across all threads." [] :validate "") (->ToolSpec "query" (str "Ad-hoc recursive query for multi-hop questions no named tool covers. " "Pass a structured Datalog-shaped object: " "{:find <rel> :rules [{:head {:rel R :args [terms]} :body [{:rel r :args [terms] :neg <bool>}]}]}. " "A term is {:var \"x\"} or a constant; base relations are triple(l,p,r) and claim(cid,l,p,r).") [(->Param "query" "object" true)] :query "") (->ToolSpec "add-def" (str "Author a claim-canonical Beagle module: add a NEW top-level def, or " "REPLACE an existing one by name (upsert by the def name). `form` is the " "whole top-level form as an EDN datum string, e.g. " "\"(defn add-two [x :- Int] :- Int (base (+ x 2)))\". Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "form" "string" true)] :upsert-form "") (->ToolSpec "set-body" (str "Author a claim-canonical Beagle module: replace the BODY of an existing " "defn named <name>. `body` is the new body as an EDN datum string, e.g. " "\"(* x 10)\" (params + return type are preserved). Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "name" "string" true) (->Param "body" "string" true)] :set-body "") (->ToolSpec "rename-def" (str "Author a claim-canonical Beagle module: rename a top-level def from <name> " "to <new-name> (O(1), scope-correct via refers_to, shadow-safe; references " "follow by identity). Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "name" "string" true) (->Param "new-name" "string" true)] :rename-def "")]
+  (let [structural [(->ToolSpec "threads" "List all threads (entities with a title) as {id,title}." [] :threads "") (->ToolSpec "show" "All claims about <id>." [(->Param "id" "string" true)] :show "") (->ToolSpec "dependents-of" "Threads that depend_on <id> (reverse depends_on)." [(->Param "id" "string" true)] :dependents "") (->ToolSpec "validate" "Structural integrity violations (cycles, dangling refs) across all threads." [] :validate "") (->ToolSpec "query" (str "Ad-hoc recursive query for multi-hop questions no named tool covers. " "Pass a structured Datalog-shaped object: " "{:find <rel> :rules [{:head {:rel R :args [terms]} :body [{:rel r :args [terms] :neg <bool>}]}]}. " "A term is {:var \"x\"} or a constant; base relations are triple(l,p,r) and claim(cid,l,p,r).") [(->Param "query" "object" true)] :query "") (->ToolSpec "add-def" (str "Author a claim-canonical Beagle module: add a NEW top-level def, or " "REPLACE an existing one by name (upsert by the def name). `form` is the " "whole top-level form as an EDN datum string, e.g. " "\"(defn add-two [x :- Int] :- Int (base (+ x 2)))\". Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "form" "string" true)] :upsert-form "") (->ToolSpec "set-body" (str "Author a claim-canonical Beagle module: replace the BODY of an existing " "defn named <name>. `body` is the new body as an EDN datum string, e.g. " "\"(* x 10)\" (params + return type are preserved). Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "name" "string" true) (->Param "body" "string" true)] :set-body "") (->ToolSpec "rename-def" (str "Author a claim-canonical Beagle module: rename a top-level def from <name> " "to <new-name> (O(1), scope-correct via refers_to, shadow-safe; references " "follow by identity). Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "name" "string" true) (->Param "new-name" "string" true)] :rename-def "") (->ToolSpec "insert-after" (str "Author a claim-canonical Beagle module: insert a NEW top-level def AFTER an " "anchor def named <after>, at a CRDT (path,tie) order-key strictly between the " "anchor and its next sibling. `form` is the whole top-level form as an EDN datum " "string, e.g. \"(defn add-two [x :- Int] :- Int (base (+ x 2)))\". Two concurrent " "inserts after the same anchor COMMUTE (both land at distinct ties). " "Recompile-gated + fail-closed.") [(->Param "module" "string" true) (->Param "after" "string" true) (->Param "form" "string" true)] :insert-after "")]
    per-pred (reduce (fn [acc pred] (vec (concat acc (pred-tools claims pred)))) [] (distinct-preds claims))]
   (dedupe-by-name (vec (concat structural per-pred)))))
 
@@ -93,15 +93,16 @@
 (defn- missing-req [op args]
   (let [need-id (or (= op :one) (or (= op :many) (or (= op :revfrom) (or (= op :show) (or (= op :dependents) (or (= op :set) (or (= op :add) (= op :remove))))))))
    need-val (or (= op :set) (or (= op :add) (= op :remove)))
-   need-module (or (= op :upsert-form) (or (= op :set-body) (= op :rename-def)))
+   need-module (or (= op :upsert-form) (or (= op :set-body) (or (= op :rename-def) (= op :insert-after))))
    e1 (if (and need-id (nil? (:id args))) ["missing required param 'id'"] [])
    e2 (if (and need-val (nil? (:value args))) ["missing required param 'value'"] [])
    e3 (if (and (= op :query) (nil? (:query args))) ["missing required param 'query'"] [])
    e4 (if (and need-module (nil? (:module args))) ["missing required param 'module'"] [])
    e5 (if (and (= op :upsert-form) (nil? (:form args))) ["missing required param 'form'"] [])
    e6 (if (and (= op :set-body) (or (nil? (:name args)) (nil? (:body args)))) ["missing required param 'name' and/or 'body'"] [])
-   e7 (if (and (= op :rename-def) (or (nil? (:name args)) (nil? (:new-name args)))) ["missing required param 'name' and/or 'new-name'"] [])]
-  (vec (concat e1 (concat e2 (concat e3 (concat e4 (concat e5 (concat e6 e7)))))))))
+   e7 (if (and (= op :rename-def) (or (nil? (:name args)) (nil? (:new-name args)))) ["missing required param 'name' and/or 'new-name'"] [])
+   e8 (if (and (= op :insert-after) (or (nil? (:after args)) (nil? (:form args)))) ["missing required param 'after' and/or 'form'"] [])]
+  (vec (concat e1 (concat e2 (concat e3 (concat e4 (concat e5 (concat e6 (concat e7 e8))))))))))
 
 (defn call [claims idx cat ^String tool args]
   (let [spec (spec-by-name cat tool)]
@@ -128,4 +129,5 @@
   (= op :upsert-form) {:edit {:op "upsert-form" :module (:module args) :form (:form args)}}
   (= op :set-body) {:edit {:op "set-body" :module (:module args) :name (:name args) :body (:body args)}}
   (= op :rename-def) {:edit {:op "rename" :module (:module args) :name (:name args) :new-name (:new-name args)}}
+  (= op :insert-after) {:edit {:op "insert-form" :module (:module args) :after (:after args) :form (:form args)}}
   :else {:error [(str "unhandled op for tool '" tool "'")]})))))))

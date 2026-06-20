@@ -219,6 +219,10 @@
                     ["set-body" ["--name" (:name e) "--body-file" bf]])
     "upsert-form" (let [sf (str work "/spec.edn")] (spit sf (:form e))
                     ["upsert-form" ["--spec-file" sf]])
+    ;; CRDT insert-anywhere (commute): the form datum goes to a temp file (the verb
+    ;; slurps + read-string's it, same as upsert-form), the anchor as --after.
+    "insert-form" (let [sf (str work "/spec.edn")] (spit sf (:form e))
+                    ["insert-form" ["--after" (:after e) "--spec-file" sf]])
     nil))
 
 ;; the corpus the verb operates over = every .bclj in the source tree (so cross-module
@@ -333,7 +337,7 @@
 
 ;; the graph-AST edit tools — these route through route-edit (a long recompile-gated
 ;; transaction), NOT the query budget. Names match the structural ToolSpecs in tools.bclj.
-(def ^:private edit-tools #{"add-def" "set-body" "rename-def"})
+(def ^:private edit-tools #{"add-def" "set-body" "rename-def" "insert-after"})
 (defn- edit-tool? [nm] (contains? edit-tools nm))
 
 ;; --- dispatch one tools/call -------------------------------------------------

@@ -33,6 +33,7 @@
 ;;       rename      <module> --old <name> --new <name>
 ;;       set-body    <module> --name <defn> --body-file <edn>
 ;;       upsert-form <module> --spec-file <edn>
+;;       insert-form <module> --after <anchor> --spec-file <edn>   (CRDT mid-insert, commute)
 ;;     --port   REQUIRED unless --no-commit — coordinator serving the CODE log.
 ;;     --log    code log to boot the store from (default $PWD/.fram/code.log).
 ;;     --out    where to write the rendered .bclj (default: a temp file path is
@@ -103,7 +104,7 @@
   (loop [a (drop 2 args)
          opts {:op (first args) :module (second args)
                :port nil :log nil :out nil :no-commit false :whole-module false
-               :old nil :new nil :name nil :body-file nil :spec-file nil}]
+               :old nil :new nil :name nil :body-file nil :spec-file nil :after nil}]
     (cond
       (empty? a) opts
       (= "--port" (first a)) (recur (drop 2 a) (assoc opts :port (Integer/parseInt (second a))))
@@ -118,6 +119,7 @@
       (= "--name" (first a)) (recur (drop 2 a) (assoc opts :name (second a)))
       (= "--body-file" (first a)) (recur (drop 2 a) (assoc opts :body-file (second a)))
       (= "--spec-file" (first a)) (recur (drop 2 a) (assoc opts :spec-file (second a)))
+      (= "--after" (first a)) (recur (drop 2 a) (assoc opts :after (second a)))
       :else (recur (rest a) opts))))
 
 ;; one-shot EDN request to the live coordinator daemon (the SAME wire fram-commit-code
@@ -129,9 +131,9 @@
       (.write w (str (pr-str req) "\n")) (.flush w)
       (edn/read-string (.readLine rd)))))
 
-(let [{:keys [op module port log out no-commit whole-module old new name body-file spec-file]} (parse-args the-args)
+(let [{:keys [op module port log out no-commit whole-module old new name body-file spec-file after]} (parse-args the-args)
       log-path (or log (str (System/getProperty "user.dir") "/.fram/code.log"))]
-  (when (str/blank? op) (die "usage: bin/fram-edit-code <op> <module> [verb args] --port <P> [--log <code.log>] [--out <file>] [--no-commit] [--whole-module]"))
+  (when (str/blank? op) (die "usage: bin/fram-edit-code <op> <module> [verb args] --port <P> [--log <code.log>] [--out <file>] [--no-commit] [--whole-module]\n  ops: rename --old <n> --new <n> | set-body --name <defn> --body-file <edn> | upsert-form --spec-file <edn> | insert-form --after <anchor> --spec-file <edn>"))
   (when (str/blank? module) (die "module is required (the @<mod># prefix to edit, e.g. schema)"))
   (when-not (.exists (io/file log-path)) (die "no code log at" log-path "(run bin/fram-ingest-code first)"))
   (when (and (not no-commit) (nil? port)) (die "--port <P> is REQUIRED unless --no-commit"))
@@ -157,7 +159,12 @@
                                    (when-not (.exists (io/file spec-file)) (die "no spec file:" spec-file))
                                    {:op "upsert-form" :module module
                                     :datum (edn/read-string (slurp spec-file))})
-                 (die "unknown op:" op "(rename | set-body | upsert-form)"))]
+                 "insert-form" (do (when (or (str/blank? after) (str/blank? spec-file))
+                                     (die "insert-form needs --after <anchor> --spec-file <edn>"))
+                                   (when-not (.exists (io/file spec-file)) (die "no spec file:" spec-file))
+                                   {:op "insert-form" :module module :after after
+                                    :datum (edn/read-string (slurp spec-file))})
+                 (die "unknown op:" op "(rename | set-body | upsert-form | insert-form)"))]
       ;; SAFETY GATE: refuse unless the daemon serves a CODE log (never lodestar).
       (let [st (coord-rt port {:op :status}) daemon-log (str (:log st))]
         (when (str/blank? daemon-log) (die "coordinator on" port "reports no :log — refusing"))
@@ -199,7 +206,12 @@
                                  (when-not (.exists (io/file spec-file)) (die "no spec file:" spec-file))
                                  {:op "upsert-form" :module module
                                   :datum (edn/read-string (slurp spec-file))})
-               (die "unknown op:" op "(rename | set-body | upsert-form)"))]
+               "insert-form" (do (when (or (str/blank? after) (str/blank? spec-file))
+                                   (die "insert-form needs --after <anchor> --spec-file <edn>"))
+                                 (when-not (.exists (io/file spec-file)) (die "no spec file:" spec-file))
+                                 {:op "insert-form" :module module :after after
+                                  :datum (edn/read-string (slurp spec-file))})
+               (die "unknown op:" op "(rename | set-body | upsert-form | insert-form)"))]
 
     ;; 1. boot the reified store over the code log (in-process; this IS the corpus).
     (let [coord (migrate-flat->co log-path)
