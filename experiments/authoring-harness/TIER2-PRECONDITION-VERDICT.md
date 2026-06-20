@@ -112,3 +112,31 @@ the named Tier-2 milestone = honest and complete; you do **not** need the miss b
 is to the plan's **content, not the timeline:** name **(B) runtime-computed dispatch** as the Tier-2 milestone,
 name **(A)** as Tier-1 ergonomics, and **delete "measured" from anything (A) touches.** Which framing anchors
 the *talk* is a call to escalate; the target + build option are settled above.
+
+## Build note (2026-06-20) — target confirmed, demo design sharpened, mechanism looks pure-hand-assert
+Started the build. Three findings, banked before the run (measure, don't assert):
+
+1. **Target confirmed RUNTIME, not literal.** datahike dispatches `-connect*` / `create-writer` /
+   `create-database` / `delete-database` on **`backend-dispatch`** (a config-derived value), and `ready-store`
+   on a config value — the method is selected from a config loaded at runtime, not a literal keyword at the
+   call site (connector.cljc:246, writer.cljc:197/205, store.cljc:53). This is the hook-proof dispatch.
+
+2. **Demo-design sharpening (HONESTY — heads off a NEW confound).** "Runtime-computed dispatch" has a trap: if
+   the dispatch value is computed from EXTERNAL runtime input (e.g. `(keyword (read-line))`), the value lives
+   in runtime DATA and **neither** text nor graph can rewrite it → "everyone misses" (the reflective-string
+   class, no graph win). The graph wins only in the **author-assertable code-use-site band**: the use-site is a
+   CODE node (e.g. a config/route-table entry keyed by the handler's dispatch keyword) whose *link* to the
+   handler is runtime-mediated by the multimethod, NOT a use-site whose *value* is external-runtime. There the
+   edge is a real reference, not spelling-derivable (lsp/clj-kondo can't model the dispatch), author-asserted.
+   Demoing the external-input variant would falsely show a tie; the code-use-site variant is the honest win.
+
+3. **Mechanism looks like PURE hand-assert (option 1, no renderer change) — pending a live run.** The renderer
+   keys "render the binding's CURRENT name" on `(= ps "v")` + a `refers-target`, **NOT** on `kind=symbol`
+   (resolve.clj:953; `refers-target` prefers the durable `bound_to`, :149-152). A keyword node carries a `"v"`
+   claim, so a HAND-ASSERTED `bound_to` on the use-site keyword node should make it render the target def's
+   current name — i.e. renaming the handler def re-renders the use-site keyword, with no resolver/renderer code
+   change. The no-capture invariant (:984) and `renders-as-tracked-name?` (:991) still apply. **To VERIFY, not
+   assert:** stand up an isolated demo (own /tmp log, non-7977 port), assert the edge, rename, render, confirm
+   the use-site re-points; then arm-LSP (clojure-lsp leaves the code-use-site keyword stale).
+
+**Next:** build + run the above on an isolated log/port.
