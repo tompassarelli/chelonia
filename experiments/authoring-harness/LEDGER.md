@@ -1,5 +1,26 @@
 # Ledger — canonical measured log (append-only; this is your memory)
 
+## ⚠ CORRECTIONS — read these FIRST; they supersede earlier entries (banked 2026-06-21 at TRACK B close)
+Two cold-vs-warm / counting confounds were found and fixed LATER in this log. Earlier entries below still
+show the pre-correction numbers (kept as the honest chronological trail). Where they differ, THESE win:
+
+1. **"recompile ~5s = the typing tax" is RETRACTED.** That 5s was a **COLD racket `.zo`-cache artifact** (first
+   beagle invocation compiling beagle-lib). **WARM recompile ≈ 645ms = beagle PROCESS STARTUP** (size- AND
+   dialect-insensitive); the **typed-compile work itself is negligible** at module scale. So recompile is NOT
+   "typing tax" and does NOT "dominate as a types cost." This is the same cold-vs-warm confound class as the
+   warm-graph-vs-cold-lsp flatter caught at the very start — found here on our OWN arm. Authoritative
+   decomposition: **S-TRACKB-DECOMP**. Superseded cites: S-GREET recompile cell (~5081-5260ms), SUMMARY
+   "recompile dominates / typed build ~5s", ADDENDUM "recompile ~5s = typing tax".
+2. **N: 79 vs 239.** `79` = distinct caller FUNCTIONS; **`239` = total semantic references** to `util/str`
+   (clojure-lsp `references`; ≈ the "~241 cljc-doubled" pre-reg flagged). **rename-N = 239.** Authoritative:
+   **S-LARGE-N-LSP** + **S-DIVERGENCE-VERDICT**. Earlier "N≈79" = distinct callers (not a contradiction); the
+   earlier "large-N divergence UNMEASURED / porting decision" lines (SUMMARY + ADDENDUM open-questions) are
+   SUPERSEDED — it WAS measured (arm-LSP ~3.1ms/ref to N=239) and Tom chose (B).
+
+The honest current decomposition (one sentence): **graph op sub-ms; typing tax negligible warm; the visible
+arm-G cost is process-startup EXECUTION; warm render already removed ~47% of the deletable part — the graph's
+cost is its tooling, not its physics.**
+
 ## Corpus index (Beagle-reachable AS IT STANDS — no porting allowed; STEP 2)
 Reachability checked 2026-06-20 by `git ls-files '*.bclj'` + dir scan. NO porting in this loop.
 - [x] **greet** (N=1) — `experiments/authoring-harness/greet.bclj`, committed, behavioral oracle. REACHABLE. MEASURED (S-GREET below).
@@ -159,6 +180,9 @@ lazy identity installation" replaces it, measured.** Classification: measured-wi
   *consistent with* module-size dominance; not isolated.
 - **recompile ~5s reattributed precisely:** the **typing tax** (beagle typecheck + emit) — the price of TYPES
   (the second variable conceded up front), NOT a graph/substrate cost. "Confounded" was vaguer than the truth.
+  **[RETRACTED — see the CORRECTIONS banner at the top: the ~5s was a COLD racket-cache artifact; WARM
+  recompile ≈645ms = beagle process startup, and the typing-tax WORK is negligible. This "typing tax"
+  reattribution was itself the cold-vs-warm confound; S-TRACKB-DECOMP is authoritative.]**
 - **render ~1.8-3.8s is deletable execution waste**, not substrate: the .bclj text projection; a
   graph->typed-AST->emit path (no intermediate text) eliminates it. Already isolated as its own layer.
 
@@ -414,4 +438,48 @@ demonstrated. The remaining optimizations are MORE of the same pattern (eliminat
 confirm, not change, the conclusion, and they're either risky-on-hot-path or cross-lane. This is the natural
 diminishing-returns boundary for TRACK B's contribution to the experiment/talk. The optimizations remain real
 *product* value (faster Fram to use) if pursued as a separate track.
+
+---
+
+# ▣ LOOP STATUS — CLOSE (2026-06-21, surfaced to Tom). The measured story is complete + honest at every weight.
+
+**What the loop set out to do:** measure whether authoring code as an identity-addressed claim graph beats
+authoring it as text under refactoring, and (TRACK B) drive arm-G's execution cost toward the substrate floor.
+
+**TRACK A — the measured comparison (DONE):**
+- **Tier-1 structural guarantee (demonstrated, language/tooling-independent):** an identity rename cannot
+  leave a missed/unverified reference and cannot false-hit the old name in a string/comment, BY
+  CONSTRUCTION. Observed live (greet: the `base` doc-comment mention left untouched while the code ref
+  re-pointed).
+- **Analyzer-based Tier-2 is structurally CLOSED:** `refers_to` is a confirmed unexpanded-surface lexical
+  walk, so the graph sees EXACTLY clojure-lsp's reference classes (symbol/keyword/macro) and no more — no
+  rename-miss where the graph beats lsp. (impl, not theorem.) Substrate advantage = Tier-1.
+- **Rename cost = amortized O(1) + durable:** first rename of a binding lazily installs N `bound_to` identity
+  edges (O(N) once, measured sub-ms each); every later rename is O(1) (measured Δ=2), and the pins survive
+  arbitrary intervening edits. Text re-finds + re-edits N spellings EVERY rename; the graph has a durable slot
+  text lacks.
+- **Large-N divergence — ANSWERED (Tom: B, no port):** arm-LSP rename **measured ~2.64s fixed + ~3.1ms/ref to
+  N=239** on real honeysql; arm-G per-ref cost sub-ms (measured small-N + O(1) mechanism). Graph favored on
+  per-ref latency — but at N=239 `util/str` is STATIC so completeness holds → the gap is **latency-only in a
+  regime already conceded text-favorable-on-correctness**, so a measured N=239 arm-G point would confirm a
+  conceded axis. `honey.sql.util` ported + honeysql's own test suite GREEN; full honey.sql port deferred.
+
+**TRACK B — the optimization (DONE, thesis content delivered):**
+- **arm-G latency is process-startup EXECUTION, not substrate** (graph op sub-ms) **and not typing tax**
+  (negligible warm — the "~5s typing tax" was a cold-cache confound; warm recompile ≈645ms = beagle startup).
+- **Warm render BUILT + verified:** daemon `:render` op + `fram-render-code --port`; **cold 644ms → warm
+  338ms (~47%), byte-identical (cmp-verified).** Strictly EXECUTION axis — never a substrate claim. Demonstrates
+  the thesis: **the graph's cost is its tooling, not its physics**, and it's engineering-closable.
+
+**Deferred → BEAGLE-HARDENING list (off the talk's critical path; pick up only to make Fram faster to use):**
+- `fram-edit-code` lazy-load (~236ms; paren-surgery on the hot `:edit-min` path — do via full-section rewrite + verify).
+- Persistent beagle process (~645ms recompile startup) + persistent racket renderer (~263ms) — cross-lane (claim `beagle-*`).
+- Full `honey.sql` port: needs `fn-multi`, `^:private`, `extend-protocol`, syntax-quote, `clojure.template` externs.
+
+**The single thing the loop could not answer (and correctly did not chase):** whether a graph that materialized
+edges BEYOND the lexical walk (dispatch/expansion-aware) could beat lsp on a MEASURED miss — that requires
+building new materialization (not measuring existing behavior), reserved for the outer loop.
+
+**LOOP HALTED.** Both tracks delivered; corrections propagated (typing-tax retraction + 79→239); every result
+stated at honest epistemic weight (measured / argued / mechanism). Receipts above; memory updated.
 
