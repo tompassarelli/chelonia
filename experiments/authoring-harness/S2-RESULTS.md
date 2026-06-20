@@ -44,9 +44,14 @@ here — the edit path is `fram-edit-code` over the log, source deleted, verifie
   `#lang beagle/clj` source and rejects the render ("expected a `module' declaration").
   `beagle-build-all` consumes the render dialect directly — it is the gate the flip itself
   uses. **The experiment harness must recompile rendered modules with `beagle-build-all`.**
-- **Render is faithful but not byte-identical** to hand-written source: different header
-  dialect + whitespace reflow (the `defn` collapses to one line). **Comments ARE preserved.**
-  Fine for the experiment: the oracle is behavioral and the canonical gate eats the render.
+- **Render is byte-STABLE + comment-faithful, not byte-identical** to hand-written source
+  (header dialect + intra-form layout reflow; comments preserved). This is the **shipping claim.**
+  Byte-identical is **MEASURED at ~half a day out and deliberately deferred** — exact-whitespace
+  preservation trades against the local-edit→local-diff property the concurrency thesis depends on;
+  in-form comments and exact layout are the **named, understood gaps, not unknowns.** Full
+  measurement + method: `BYTE-IDENTICAL-MEASUREMENT.md` (10/11 modules byte-identical in a 1m52s
+  spike; one-line lexeme fix). Fine for the experiment regardless: the oracle is behavioral and the
+  canonical recompile gate consumes the byte-stable render.
 
 ## What this IS / ISN'T
 - **IS:** the write-side backbone — graph-canonical edits + identity re-pointing, end-to-end,
