@@ -96,6 +96,25 @@ empirical Tier-2 number.
     **demoted to Tier-1 ergonomics, NOT a measured Tier-2** — the symmetric-engineering rule (the text baseline
     *includes* the hook) collapses it to the honeysql ergonomics category. A static-keyword defmethod is
     hook-recoverable → do not use it. Full correction in `TIER2-PRECONDITION-VERDICT.md`.
+  - **CORRECTION (advisor #3): multimethods may not isolate the property, and the work-order was inverted.**
+    A plain-keyword multimethod uses the SAME literal keyword at the defmethod and the config use-site (the
+    only way value-dispatch matches), so the rename is **spelling-coupled** — clojure-lsp's keyword rename
+    plausibly catches both, runtime-mediation notwithstanding. "Hook-proof" defended the wrong axis (it stops
+    *computing* the edge, not *renaming* the shared keyword). **So run the lsp falsifier FIRST** (real
+    datahike `:self`, LSP-server rename-at-position): if lsp renames both → TIE/honeysql-land (Tier-1 only);
+    if it refuses the bare keyword → a real miss whose honest cause is "lsp won't rename ambiguous unqualified
+    keywords," not "hook-proof." Measuring now; the graph demo is NOT built until this gate returns.
+  - **MEASURED (2026-06-20, clojure-lsp 2025.11.28 server, rename-at-position, with positive controls):**
+    outcome #2 — clojure-lsp **refuses** to rename the unqualified `:self` at both the defmethod and the config
+    use-site (`"only namespaced keywords can be renamed"`), while it **succeeds** on a var (`backend-dispatch`)
+    and a namespaced keyword (`::tx-data`). Honest cause = **qualification, not runtime dispatch**. BUT the
+    symmetric-engineering counter weakens it: namespacing the keyword (`:datahike/self`) makes clojure-lsp
+    rename it completely → the gap is **convention-contingent, not structural** (honeysql's ceiling again). The
+    one residual namespacing doesn't close (identity without changing spelling, for un-retro-namespaceable
+    keywords) needs the graph arm built + over-rename handled = unmeasured, contestable. **Escalation:** Tier-2
+    has no clean structural miss here; (i) stand on Tier-1 + substrate, using the lsp refusal as an
+    *illustration* (incumbent concedes "needs a namespace = needs identity"), or (ii) pursue the contestable
+    residual. **My lean: (i).** Graph arm NOT built pending the call. Full data: `TIER2-PRECONDITION-VERDICT.md`.
 
 **2. (EMPIRICAL — resolved by running, not a decision) Does clojure-lsp latency grow with N?** Unmeasured.
 Pre-registered to measure lsp wall-time at each N. If flat, the latency axis is "graph slower at every N"

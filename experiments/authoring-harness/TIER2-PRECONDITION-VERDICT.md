@@ -140,3 +140,81 @@ Started the build. Three findings, banked before the run (measure, don't assert)
    the use-site re-points; then arm-LSP (clojure-lsp leaves the code-use-site keyword stale).
 
 **Next:** build + run the above on an isolated log/port.
+
+## CORRECTION (advisor #3, 2026-06-20) — the multimethod squeeze + work-order inverted
+The build note above re-committed two sins; recording the correction in full (the trail matters).
+
+1. **"hook-proof by construction" defended the WRONG axis.** Runtime-computed dispatch stops a static tool
+   from *computing* the config→defmethod edge. It says nothing about whether a static tool can *rename the
+   keyword*. For ANY working plain-keyword multimethod the dispatch value is the **same literal keyword** at
+   the defmethod and at the config use-site — that is the only way value-dispatch matches (`(defmethod
+   -connect* :self ...)` fires only if `backend-dispatch` yields literal `:self`, which forces literal `:self`
+   into the config; datahike confirms: `:self` is a literal at connector.cljc:248 + writer.cljc:162/199 AND at
+   config.cljc:67 `(def self-writer {:backend :self})`). Same spelling at both sites ⇒ the rename is
+   **spelling-coupled** ⇒ clojure-lsp's keyword rename plausibly catches both *without ever knowing the
+   dispatch is runtime-mediated*. Runtime mediation is irrelevant to the rename.
+2. **The squeeze (kills multimethods as the vehicle).** The only way to break spelling-coupling is to compute
+   the use-site value (`{:backend (choose-backend)}`). But then (a) the graph's lexical walk can't derive the
+   edge either (the reflective class both tools concededly miss), AND (b) "rename-and-propagate" stops being
+   coherent — no literal at the use-site to carry the rename; changing the defmethod alone just breaks
+   dispatch. So a multimethod's cross-link is necessarily a shared literal keyword wherever rename is
+   meaningful, and a shared literal keyword is exactly what keyword-rename tooling targets. **Multimethods
+   structurally cannot isolate "a reference carried by something other than spelling"** — the property the demo
+   needs. (My finding-#2 "graph wins in the author-assertable band" asserted the win; same offense as
+   "propagation lsp structurally can't." Retracted pending measurement.)
+3. **Work-order was inverted (anti-Edison on my own plan).** I scheduled the arm-LSP comparison LAST, after
+   standing up the graph demo. But the lsp result is the **gate** that decides whether there is a miss to demo
+   at all. So: **run the lsp falsifier FIRST**, on the real datahike `:self`, via the LSP server's
+   rename-at-position (the CLI `rename` is symbol-only: `--from <FQNS>`). Three pre-registered outcomes:
+   - **lsp renames both** (defmethods + config) → TIE → honeysql-land; the substrate story is **Tier-1
+     ergonomics, not a measured miss**. An honest result, same as honeysql.
+   - **lsp refuses the unqualified keyword** → a real miss, but the honest cause is "**lsp won't rename a bare
+     ambiguous keyword**," NOT "runtime dispatch is hook-proof" — rename the claim to match the measurement
+     (then it is Tom's call whether that weaker property anchors the talk).
+   - **lsp partially fires** → measure exactly which positions and report that.
+
+### RESULT (MEASURED 2026-06-20 — clojure-lsp 2025.11.28 server, `textDocument/rename`, with positive controls)
+Driver: `/tmp/lsp_rename_probe2.py` (LSP server, rename-at-position; the CLI `rename` is symbol-only). Ran on
+the real datahike source (isolated copy at `/tmp/lsp-dh`).
+
+| target | kind | result |
+|---|---|---|
+| `backend-dispatch` (connector.cljc:243) | **var** (control) | ✅ renamed — 2 edits (def + `#'`ref :246) |
+| `::tx-data` (norm.clj:131) | **namespaced keyword** (control) | ✅ renamed — 2 edits (`s/def` + use in `::norm-map` :133); auto-ns resolved to `:datahike.norm.norm/tx-data2` |
+| `:self` at `(defmethod -connect* :self ...)` | **unqualified keyword** | ❌ ERROR `"Can't rename - only namespaced keywords can be renamed."` |
+| `:self` at `(def self-writer {:backend :self})` | **unqualified keyword** | ❌ same error |
+
+**Outcome = advisor's case #2 (lsp refuses the unqualified keyword), bulletproofed by the two positive
+controls.** clojure-lsp renames vars and NAMESPACED keywords with full cross-ref completeness; it
+**structurally refuses unqualified keywords** by a hard guard. The honest cause is **qualification, not
+runtime dispatch** — runtime mediation never enters; the guard fires on the element type alone.
+
+**Honest claim, renamed to match the measurement:** the best text tool will not rename datahike's unqualified
+`:self` backend keyword at all; a developer is on their own with an unsafe global find/replace (which is *why*
+lsp refuses — bare `:self` is ambiguous).
+
+**Symmetric-engineering counter (must be stated — it weakens this):** the strongest realistic text setup
+NAMESPACES the keyword (`:datahike/self`), and clojure-lsp then renames it completely (Control B proves it).
+So the specific gap **closes under idiomatic text usage** → this is a **convention-contingent property, NOT a
+structural impossibility**. The same place honeysql landed, in a new costume.
+
+**The one residual that namespacing does NOT close (candidate framing, graph side still UNMEASURED):**
+namespacing *changes the keyword's value* (a data/wire-contract change); the graph can attach identity to a
+keyword **without changing its spelling**. So for unqualified keywords you can't retro-namespace (legacy data
+contracts), text has no safe rename and the graph could — BUT only with hand-asserted identity edges (keywords
+are inert leaves today, :868), and the graph must then ALSO avoid over-renaming unrelated `:self` (the exact
+ambiguity lsp cited). That is the substrate argument again, and it is **not yet measured** — do not assert it.
+
+**Rhetorical asset (honest, no overclaim):** clojure-lsp's own error — *"only namespaced keywords can be
+renamed"* — is the incumbent conceding that **without identity, a name cannot be safely refactored.** That is
+the addressing thesis stated by the text tool itself. It illustrates Tier-1; it is not a benchmarked Tier-2 win.
+
+**Where this leaves Tier-2 (escalation, per advisor #2):** no clean structural Tier-2 miss is available here
+either — namespacing closes it on the text side. Options, Tom/advisor's call:
+- **(i)** Talk stands on **Tier-1 + the substrate/addressing argument**, using the measured lsp refusal as a
+  concrete *illustration* (the incumbent's own "needs a namespace = needs identity" admission). Honest, no
+  contested graph-beats-lsp claim. *My lean.*
+- **(ii)** Pursue the residual (un-retro-namespaceable unqualified keyword) as a measured graph-win — requires
+  building the graph arm with hand-asserted identity AND honestly handling over-rename; weaker + contestable.
+- **Do NOT build the graph arm until (i)/(ii) is chosen** — building the favorable arm before the claim is
+  settled is the anti-Edison failure again.
