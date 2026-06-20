@@ -381,3 +381,13 @@ TRACK B column. Classification: measured-with-config + correctness-verified (byt
 **Next:** persistent racket renderer (kill the 263ms), then wire `fram-render-code --port` to use `:render` by
 default; then persistent beagle (the ~645ms recompile startup).
 
+**Wired `fram-render-code --port` (committed):** routes render through `:render`; **cold 644ms → warm 338ms
+(~47%), byte-identical.** (Restructured so the warm path is a top-level early-exit before the cold forms load
+the heavy machinery.) **arm-G end-to-end WARM = 1396ms** (edit 336 + warm-render 385 + recompile 675), down
+from the cold ~1.6-2.8s. **Every remaining chunk is process STARTUP** (the substrate ops are sub-ms): recompile
+675ms = beagle racket startup; edit 336ms = fram-edit-code heavy load + socket; warm-render 385ms ≈ racket
+--render 263ms + socket. So arm-G's whole ~1.4s is execution/process-startup, not substrate — a fully
+persistent toolchain (persistent beagle + persistent fram clients + persistent renderer) reaches the sub-100ms
+substrate floor. Warm-render demonstrated one leg of that. Remaining legs = persistent processes (bigger,
+beagle-side). This is the measured proof that arm-G latency is ENGINEERING-CLOSABLE execution, not substrate.
+
