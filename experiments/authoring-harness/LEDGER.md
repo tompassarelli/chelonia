@@ -114,3 +114,67 @@ remaining question is a porting/scale decision above my authority.
 
 **HALTED 2026-06-20.** Disk state (LOOP-SPEC/PREREGISTER/LEDGER/harness.sh) is the canonical record.
 
+---
+
+## ADDENDUM (post-review, 2026-06-21) — pulled the footnoted O(N) thread
+Review: the rename's N+2 log growth, shelved as "O(N) storage, cheap in time," is the one finding that
+touches the headline ("re-points for free"); settle whether the index rewrite is NECESSARY or AVOIDABLE
+(cheaper than the large-N port). Pulled it.
+
+### S-REWRITE-NECESSITY — measured + code-grounded
+**What the N extra claims ARE** (log diff, rename `vars-of`, N=4): four **`bound_to` asserts**
+(`@query#292 bound_to @query#166` ...) + the 2-op name change (retract old `v` / assert new `v`). They are
+**durable IDENTITY-edge materializations, NOT `refers_to` re-asserts.** The first rename of a binding lazily
+PINS its N references to the binding's `@mod#int`.
+
+**Amortization (decisive test — 3 sequential renames of the same binding):**
+- #1 vars-of->vars-set:    Δ=**6** (2 + 4 `bound_to` installed)
+- #2 vars-set->vars-final: Δ=**2** (O(1) — edges already exist)
+- #3 vars-final->vars-x:   Δ=**2** (O(1))
+The O(N) is paid **ONCE per binding**; every subsequent rename is **O(1)**.
+
+**Mechanism (code-grounded):** `verb-rename!` (resolve.clj:1137) does ONLY the 2-op name change (:1170-1174)
+after read-only collision/no-capture/import checks (:1140-1169). The N `bound_to` writes come from the
+daemon's **scoped re-resolve AFTER** the verb (:1180-1181), materializing the durable identity edge for
+exactly the references whose binding spelling changed and aren't yet pinned. Pinned refs are skipped → O(1).
+
+**VERDICT (necessary or avoidable):** **necessary, not redundant.** It is the one-time conversion of
+references from spelling-resolution to durable identity-pinning. Not avoidable without cost-shifting
+(pre-install at ingest pays for bindings never renamed; keep spelling-resolution → abandon identity). Placed
+optimally (lazy, per-binding, first rename) and **amortizes to O(1)**.
+
+**What this BOOKS (substrate win, now honest + measured):** text rename = **O(N) writes EVERY time** (re-edit
+N spellings; no durable identity to amortize into). Graph rename = **O(N) writes ONCE** then **O(1) forever**.
+The amortization IS "re-point for free" — but honestly: free *after* the one-time identity installation, the
+durable edge text has no slot for. **"Free re-point" as unqualified language is RETIRED; "amortized O(1) after
+lazy identity installation" replaces it, measured.** Classification: measured-with-config + code-grounded.
+
+### CALIBRATION corrections to the SUMMARY above (review was right)
+- **"curves flattened" overstates.** N=1..4, 2 runs, ~40ms noise, no monotonic trend = *consistent with flat*,
+  not decisive. The NULL sits in the regime the prediction already declared empty (divergence needs large N).
+  Flat-flat was near-preordained; the live question (lsp climbing at N≈79 while the graph stays flat) is
+  UNTOUCHED = the porting call reserved for Tom.
+- **"arm-G edit tracks log size" is CONFOUNDED.** It leans on 3 *different* modules (greet/fold/query) that
+  differ in more than log size — the same confound I refused on the N-axis, quietly let back in. Demote to
+  *consistent with* module-size dominance; not isolated.
+- **recompile ~5s reattributed precisely:** the **typing tax** (beagle typecheck + emit) — the price of TYPES
+  (the second variable conceded up front), NOT a graph/substrate cost. "Confounded" was vaguer than the truth.
+- **render ~1.8-3.8s is deletable execution waste**, not substrate: the .bclj text projection; a
+  graph->typed-AST->emit path (no intermediate text) eliminates it. Already isolated as its own layer.
+
+### PARKED — product knobs (NOT talk work; do not build for the talk)
+Execution-axis only; none touch the substrate claim. Ordered by the dependency the data implies:
+1. **Typed-in-memory** (graph->typed-AST->emit, never serialize text): deletes render + re-parse, KEEPS types
+   (stays the typed arm). Build FIRST — shrinks the window the others need. (graph->clj-untyped = a DIFFERENT
+   arm, untyped-graph-vs-text; name it honestly if ever built.)
+2. **Incremental typecheck** (recheck only the changed def's dependents): attacks the DOMINANT cost (typing
+   tax) → probably highest-leverage.
+3. **Optimistic recompile** (speculative, hashed, pruned): latency-HIDING not cost reduction — report
+   "time-to-available-when-warm" as its OWN column, never as rename cost (that's the warm-graph-vs-cold-lsp
+   flatter, caught once). Daemon warm-store pattern one layer up; only pays after knob 1.
+Talk's measured content is done; keep optimization and measurement in separate buckets so a perceived-latency
+win never leaks into the substrate column.
+
+**Thread settled. Loop still HALTED.** Open question unchanged + Tom's: large-N divergence (porting), now
+joined by an optional product track (knobs above).
+
