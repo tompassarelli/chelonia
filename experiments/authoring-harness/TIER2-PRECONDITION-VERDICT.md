@@ -247,6 +247,13 @@ no others** — symbols, keywords (qualified or not), and is blind to post-expan
 analyzer-based Tier-2 (a measured miss) is therefore closed across all three classes: symbol (honeysql),
 keyword (datahike), macro (unexpanded-surface, confirmed). The miss-hunt ends here, cleanly.
 
+**SCOPE — hold this precisely (implementation, NOT theorem).** "Closed by direct read" is true of THIS
+codebase as it stands: the projection sources from the surface datum, so the graph happens to see exactly
+text's analyzer classes. A graph that materialized *post-expansion* refs WOULD see a class lsp misses — that
+is not closed in general. The honest, bulletproof claim is **"the graph AS BUILT sees the analyzer classes
+text sees, so the substrate win is Tier-1,"** NOT "a graph can never compute more." Pin it to the
+implementation and it survives any Q&A; let it drift to the general claim and a sharp listener reopens it.
+
 **What the substrate advantage actually is: entirely Tier-1 structural** (demonstrated, not benchmarked) — O(1)
 re-point on rename, no false-hits in strings/comments by construction, and a durable slot for an edge text has
 nowhere to keep. Real, but not a measured-miss.
