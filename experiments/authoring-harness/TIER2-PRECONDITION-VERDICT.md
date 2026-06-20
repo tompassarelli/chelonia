@@ -67,24 +67,48 @@ The finding sharpens, not deflates, the thesis — by separating two questions t
   just another `refers_to`/`bound_to` claim; **text has no slot** for a non-lexical edge and must re-derive from
   spelling on every rename. This *is* the addressing thesis.
 
-So the cleanest Tier-2 demonstration **isolates the substrate**: reify ONE dynamic edge (keyword → defmethod),
-rename, show uniform propagation; lsp can't, because the edge is invisible to static text **and** it has
-nowhere durable to keep it.
+So the cleanest Tier-2 demonstration **isolates the substrate**: reify ONE edge **no static analyzer can
+derive** — a *runtime-computed* dispatch, NOT a static-keyword one (see the correction below) — rename, show
+propagation. The graph can; text can't, not because lsp is weak but because text has **no durable slot** for an
+edge that didn't come from spelling. **Name the hand-assertion as the point:** of course the edge was authored;
+the claim is that text has nowhere to keep it.
 
-## (b) build options + price (this becomes the NAMED Tier-2 plan)
-1. **Minimal substrate demo (cheapest, purest, ~hours).** Hand-assert a `bound_to` claim linking a dynamic
-   ref (a multimethod dispatch-keyword use-site) to its `defmethod`, rename, show propagation vs lsp's miss.
-   Isolates substrate from analyzer. Risk: a skeptic calls the hand-authored edge "cheating" → frame as
-   "the substrate has a *slot* for the edge; text has none — *who* authors it is orthogonal."
-2. **Keyword-dispatch materialization pass (~1–2 days).** Extend the resolver to emit a `dispatch-key →
-   defmethod` edge. General, real. Corpus: datahike multimethods.
-3. **Expand-then-index (macro-generated defs).** Larger — needs an expansion phase fram deliberately lacks.
-- **Symmetric-engineering check (make it either way):** clj-kondo has a *hooks* system (per-macro, hand-written,
-  re-derives each run) + community re-frame configs. So the fair claim is "**graph: one uniform durable slot**"
-  vs "**lsp: per-pattern hook + recompute**," and the target that no static tool can win even with hooks is a
-  **runtime-computed dispatch** (value/registration computed at runtime) — only a substrate with a slot can carry it.
+## (B) is the anchor, (A) is demoted to Tier-1 — the correction (advisor 2026-06-20 #2)
+The first draft of this doc leaned (A) for the demo and named (B) as an "even-here" extension. **That inverts
+it, and re-commits the two failure modes this project exists to avoid:**
+- **(A) "uniform substrate vs per-macro hooks" is NOT a measured Tier-2 — the symmetric-engineering rule kills
+  it.** The fair text baseline for a *hook-able* pattern (a static-keyword defmethod, a re-frame id) **includes
+  the clj-kondo hook** — "best realistic tooling for the text arm" is our own rule. Grant the hook and
+  completeness stops separating; the only graph advantage left is "one mechanism vs a hook per macro" =
+  uniformity/ergonomics = the **honeysql category we already rejected**, wearing a Tier-2 label. (A) survives
+  only as **Tier-1 ergonomics color**, not a measured miss. Delete "measured" from anything (A) touches.
+- **"propagation lsp structurally can't" was asserted, not measured.** Whether clojure-lsp renames *through* a
+  clj-kondo hook-asserted keyword edge is an **empirical fact not yet run.** We owe lsp the scrutiny we gave
+  the resolver before stating what it structurally can't do.
+
+**So the lean flips: (B) — a RUNTIME-COMPUTED dispatch — is the Tier-2 anchor.** It is **hook-proof by
+construction**: no hook can compute a dispatch value that only exists at runtime, so (B) **sidesteps** the
+unmeasured "lsp-through-hook" fact instead of betting against it. And (B) is **not contrived** — open dispatch
+on a computed value is idiomatic multimethod usage (the reason multimethods exist) and is exactly the
+*reference-that-isn't-spelling* the thesis is about. (A)'s "just write the hook" is the fatal vulnerability,
+not (B)'s setup.
+
+## Build (the measured Tier-2 milestone) — option 1, on a COMPUTED-dispatch method
+- **Target:** not "a datahike multimethod" but one whose **dispatch value is computed at runtime**, not a
+  literal keyword (a static-keyword defmethod is hook-recoverable → drops straight back into (A)). Candidate:
+  datahike's backend-dispatch (`ready-store` / `create-writer` / `-connect*`, dispatched on a config value
+  loaded at runtime) — **verify the dispatch is genuinely runtime, not a code literal**, before committing it.
+- **Option 1 (hand-assert, ~hours, purest isolation):** reify ONE `bound_to` claim linking the runtime
+  use-site to its handler, rename, show graph propagation; arm-LSP can't (no static link, no slot). State it
+  straight: we reify an edge no static analyzer can derive, assert it once as a claim, rename, propagation is
+  uniform — **name the hand-assertion as the point** (hide it and a sharp listener hears "you hand-fed the
+  graph"; the point is text has nowhere to keep the edge even when you possess it).
+- Options 2 (keyword-dispatch materialization pass, ~1–2 days) and 3 (expand-then-index, larger) are
+  *generalizations of the analyzer*, separate from this measured milestone.
 
 ## Bottom line for the proposal
-**Wednesday:** name this plan (reify-one-dynamic-edge demo on datahike multimethods). Tier-1 + N=1 + the latency
-tradeoff + this named plan = honest and complete. **October:** do build option 1 (and/or 2), measure. **Do NOT
-claim a measured Tier-2 before the edge is reified.**
+**Wednesday is unaffected; the default stands.** Ship on the named plan — Tier-1 + N=1 + the latency tradeoff +
+the named Tier-2 milestone = honest and complete; you do **not** need the miss banked for the proposal. The fix
+is to the plan's **content, not the timeline:** name **(B) runtime-computed dispatch** as the Tier-2 milestone,
+name **(A)** as Tier-1 ergonomics, and **delete "measured" from anything (A) touches.** Which framing anchors
+the *talk* is a call to escalate; the target + build option are settled above.

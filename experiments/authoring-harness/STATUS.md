@@ -89,11 +89,13 @@ empirical Tier-2 number.
     and propagate rename uniformly" is the substrate/addressing question — graph wins by construction (the edge
     is just another claim; text has no slot). The cleanest Tier-2 demo ISOLATES the substrate: reify ONE
     dynamic edge, rename, show propagation lsp can't.
-  - **Named Tier-2 plan (for the proposal):** reify-one-dynamic-edge demo on **datahike multimethods** (richest
-    local corpus). Build options priced in the verdict doc: (1) hand-asserted `bound_to` demo (~hours,
-    purest), (2) keyword-dispatch materialization pass (~1–2 days), (3) expand-then-index (larger). Symmetric
-    check: clj-kondo has per-macro *hooks*, so frame as "graph: one uniform durable slot" vs "lsp: per-pattern
-    hook + recompute"; the hook-proof target is a runtime-computed dispatch.
+  - **Named Tier-2 milestone (CORRECTED, advisor #2):** reify ONE edge on a **RUNTIME-COMPUTED dispatch**
+    method (datahike backend-dispatch), build option 1 (hand-assert `bound_to`, ~hours). **(B) runtime-dispatch
+    is the anchor** — hook-proof by construction, so it sidesteps the *unmeasured* "does lsp rename through a
+    clj-kondo hook" fact instead of asserting against it. **(A)** (uniform substrate vs per-macro hooks) is
+    **demoted to Tier-1 ergonomics, NOT a measured Tier-2** — the symmetric-engineering rule (the text baseline
+    *includes* the hook) collapses it to the honeysql ergonomics category. A static-keyword defmethod is
+    hook-recoverable → do not use it. Full correction in `TIER2-PRECONDITION-VERDICT.md`.
 
 **2. (EMPIRICAL — resolved by running, not a decision) Does clojure-lsp latency grow with N?** Unmeasured.
 Pre-registered to measure lsp wall-time at each N. If flat, the latency axis is "graph slower at every N"
