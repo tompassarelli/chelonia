@@ -21,6 +21,7 @@
 (declare-extern fram.rt/log-path [-> String])
 (declare-extern fram.rt/ensure-dir [String -> Nil])
 (declare-extern fram.rt/spit-file [String String -> Nil])
+(declare-extern fram.rt/slugify [String -> String])
 (declare-extern fram.rt/coord-version [Int -> Int])
 (declare-extern fram.rt/coord-assert [Int String String String Int -> String])
 (declare-extern fram.rt/coord-retract [Int String String String Int -> String])
@@ -29,16 +30,6 @@
 (declare-extern fram.rt/coord-watch [Int -> Nil])
 (declare-extern fram.rt/history [String String -> Nil])
 (declare-extern fram.rt/parse-edn [String -> Any])
-
-;; URL/filename slug from a title — pure string ops (was an rt extern).
-(defn- slugify [title :- String] :- String
-  (let [base (-> (str/lower-case title)
-                 (str/replace #"[^a-z0-9]+" "_")
-                 (str/replace #"^_+" "")
-                 (str/replace #"_+$" ""))
-        capped (if (> (count base) 60) (subs base 0 60) base)
-        clean (str/replace capped #"_+$" "")]
-    (if (str/blank? clean) "untitled" clean)))
 
 ;; --- display helpers --------------------------------------------------------
 
@@ -92,7 +83,7 @@
         (doseq [te tes]
           (let [title (k/one-i idx te "title")
                 fname (str (subs te 1) "-"
-                           (slugify (if (some? title) title "untitled")) ".md")]
+                           (fram.rt/slugify (if (some? title) title "untitled")) ".md")]
             (fram.rt/spit-file (str out-dir "/" fname) (exp/thread-md log-claims te))))
         (println (str "exported " (count tes) " threads -> " out-dir))))))
 

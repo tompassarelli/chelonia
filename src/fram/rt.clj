@@ -98,6 +98,14 @@
       (if got got (recur (inc n))))))
 (defn release-id [dir id] (.delete (io/file (lock-path dir id))) nil)
 
+(defn slugify [title]
+  (let [base (-> (str/lower-case (str title))
+                 (str/replace #"[^a-z0-9]+" "_")
+                 (str/replace #"^_+" "")
+                 (str/replace #"_+$" ""))
+        capped (if (> (count base) 60) (subs base 0 60) base)
+        clean (str/replace capped #"_+$" "")]
+    (if (str/blank? clean) "untitled" clean)))
 
 ;; --- portable defaults ------------------------------------------------------
 
