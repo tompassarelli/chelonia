@@ -29,70 +29,40 @@
 ;; with-resolve-read resolve at compile time (load-file is run-once by nature).
 (load-file (str (System/getProperty "user.dir") "/chartroom/src/resolve.clj"))
 
-;; ---- state: one reified coordinator + a cached read index ------------------
-(def co (atom nil))                  ; {:store :log :lock} — reified canonical (v2 log)
-(def flat-log (atom nil))            ; the flat log, now a PROJECTION the cold CLI folds
-(def cache (atom {:index nil :version -1}))
-(def subscribers (atom []))
+;; ---- self-hosted core: the pure-logic (cut 1) + atom-orchestration (cut 2) now live
+;; in the Beagle module fram.coord-daemon. This shim RE-EXPORTS them as bare names so the
+;; resolver-woven handlers + handle + socket + boot floor below resolve UNCHANGED and SHARE
+;; the cut-2 state atoms ((def x cd/x) on an atom aliases the same object). do-assert/
+;; do-retract bridge the Beagle !-suffix. *flat-batch* is a ^:dynamic var (binding can't
+;; see an alias) so do-edit-min binds cd/*flat-batch* directly; subscriber delivery moved to
+;; fram.rt (do-assert! fires fram.rt/notify-subs!; :subscribe registers via fram.rt/subscribe!).
+(require '[fram.coord-daemon :as cd])
+;; state atoms (shared object identity)
+(def co cd/co) (def flat-log cd/flat-log) (def cache cd/cache) (def flat-mtime cd/flat-mtime)
+(def flat-canonical? cd/flat-canonical?) (def refers-version cd/refers-version)
+(def dirty-modules cd/dirty-modules) (def export-snapshot cd/export-snapshot)
+(def materialized? cd/materialized?) (def last-materialize cd/last-materialize)
+(def corpus-groups cd/corpus-groups) (def node-name-seq cd/node-name-seq)
+;; const sets
+(def schema-preds cd/schema-preds) (def resolve-preds cd/resolve-preds) (def read-hidden-preds cd/read-hidden-preds)
+;; read-bridge / index / datalog / warm / writes / helpers
+(def module-of-name cd/module-of-name) (def mark-dirty! cd/mark-dirty!) (def reset-refers-state! cd/reset-refers-state!)
+(def flat-line cd/flat-line) (def append-flat! cd/append-flat!) (def flush-flat-batch! cd/flush-flat-batch!)
+(def claim->triple cd/claim->triple) (def reified->claims cd/reified->claims) (def lp-live-triples cd/lp-live-triples)
+(def idx-build cd/idx-build) (def bucket-update cd/bucket-update) (def idx-add cd/idx-add) (def idx-del cd/idx-del)
+(def var-term? cd/var-term?) (def unify1 cd/unify1) (def unify-tuple cd/unify-tuple) (def resolve-arg cd/resolve-arg)
+(def lit-candidates cd/lit-candidates) (def eval-body-idx cd/eval-body-idx) (def ground-head cd/ground-head)
+(def simple-query? cd/simple-query?) (def idx-run cd/idx-run)
+(def warm! cd/warm!) (def index! cd/index!) (def warm-claims cd/warm-claims) (def warm-idx cd/warm-idx)
+(def apply-commit-delta! cd/apply-commit-delta!) (def ref-shape? cd/ref-shape?) (def kind-of cd/kind-of)
+(def all-violations cd/all-violations) (def module-node-ids cd/module-node-ids) (def node-path cd/node-path)
+(def ast-pred-str? cd/ast-pred-str?) (def next-module-int cd/next-module-int) (def global-max-name-int cd/global-max-name-int)
+(def seed-name-seq! cd/seed-name-seq!) (def reserve-name-ints! cd/reserve-name-ints!) (def allocate-positions cd/allocate-positions)
+;; Beagle !-suffix bridge (consumers call do-assert/do-retract)
+(def do-assert cd/do-assert!) (def do-retract cd/do-retract!)
+
+
 (def dlock (Object.))                ; serializes reload + writes + reads (drop-in mode)
-(def flat-mtime (atom nil))          ; last-seen flat-log stamp (to detect external edits)
-(def flat-canonical? (atom false))   ; drop-in mode: flat log is canonical, reload absorbs edits
-(def schema-preds #{"name" "cardinality" "value_kind" "cnf-supersedes"})
-
-;; ---- warm scope-correct code-intelligence (refers_to materialized over `co`) -
-;; resolve.clj's lexical resolver (loadable as a library) writes refers_to + render-
-;; marker claims into a store. We run it OVER the warm `co` store, version-cached.
-;; These predicates are DERIVED / in-memory: they must (a) never reach the flat log,
-;; (b) never leak into the S1 :query warm cache (which keys on current-seq), and
-;; (c) never bump current-seq. claim->triple filters them out of every read projection
-;; (so :query/:warm-check/the read view never see them); the materialize step rolls
-;; back the seq-space the resolver's tx consumed.
-(def resolve-preds #{"refers_to" "keep_spelling" "qualifier" "ctor_prefix" "accessor_field" "supersedes"})
-;; #(a) identity: bound_to is DURABLE (persisted to the flat log — an authored identity edge,
-;; reference -> binding's stable @mod#int) but for option-1 scope is kept OUT of read projections
-;; (:query/datalog/warm-cache/tripwire) — render+resolve read it off the store directly. Filtered
-;; HERE (read view) WITHOUT being a resolve-pred (which would strip it from the store + roll back seq).
-(def read-hidden-preds #{"bound_to"})
-(def refers-version (atom -1))       ; the co version refers_to was last materialized at
-
-;; ---- S3.3: scoped re-resolve state -----------------------------------------
-;; Whole-corpus re-resolve on every code edit is O(corpus) per commit — the swarm
-;; write-ceiling. S3.3 makes re-resolve MODULE-GRANULAR: track which modules an
-;; edit touched (dirty), classify by EXPORT-SET delta (not syntactic site), and
-;; re-resolve ONLY the affected module set (dirty ∪ export-changed consumers).
-;; dirty-modules  : modules with an asserted/retracted AST claim since last materialize.
-;; export-snapshot: {module -> #{exported/top-level name}} captured at the last
-;;                  materialize — the classifier diffs the live set against it.
-;; materialized?  : has refers_to been fully materialized at least once (cold gate —
-;;                  the FIRST materialize is necessarily whole-corpus). maybe-reload!
-;;                  (external flat rebuild) resets it, forcing a fresh whole pass.
-;; last-materialize: instrumentation for the gate — {:mode :scoped|:whole :walked #{mods}
-;;                  :stripped <n> :forms-walked <n>}. Read via the :refers-debug op.
-(def dirty-modules (atom #{}))
-(def export-snapshot (atom {}))
-(def materialized? (atom false))
-(def last-materialize (atom nil))
-;; module of an AST node name "@kernel#127" -> "kernel" (same parse resolve.clj uses).
-(defn- module-of-name [nm]
-  (when (string? nm)
-    (when-let [[_ m] (re-matches #"@([^#]+)#\d+" nm)] m)))
-;; record that a commit touched te's module (te is "@mod#int"); skip non-AST te.
-(defn- mark-dirty! [te]
-  (when-let [m (module-of-name te)] (swap! dirty-modules conj m)))
-;; The incremental corpus cache (ensure-corpus-groups! below) — declared here so the reload-reset
-;; can invalidate it; the fns that use it are defined after with-resolve-read.
-(def corpus-groups (atom nil))    ; {module-src -> [entity-ids]} | nil (cold/invalidated)
-
-;; reset all S3.3 derived state — called when `co` is REBUILT wholesale (boot /
-;; external flat reload): the in-memory refers_to + export snapshot belong to the OLD
-;; store, so the next materialize must be a fresh cold whole-corpus pass.
-(defn- reset-refers-state! []
-  (reset! dirty-modules #{})
-  (reset! export-snapshot {})
-  (reset! materialized? false)
-  (reset! refers-version -1)
-  (reset! last-materialize nil)
-  (reset! corpus-groups nil))
 
 ;; ---- DoS hardening knobs (findings #2/#5/#19/#20) --------------------------
 ;; Read timeout on every accepted socket — mirrors the CLIENT side (fram.rt
@@ -154,274 +124,6 @@
     (throw (ex-info "edn too deep" {:type :edn-too-deep})))
   (edn/read-string line))
 
-;; flat-log projection: each reified commit also appends the flat {:op :l :p :r}
-;; line the CLI's cold fold reads — so "files are pure projections of the reified
-;; store" (Stage 7) and existing reads keep working UNCHANGED across the cutover.
-;; Refreshes flat-mtime so our OWN write isn't mistaken for an external edit.
-;; flat-log batching: a multi-claim commit collects its lines and writes+fsyncs ONCE (1 fsync per
-;; commit, NOT per claim — the per-claim fsync was the dominant authoring cost, ~13 fsyncs/def).
-;; *flat-batch* (an atom of line-strings) is bound around a commit; nil => write immediately.
-(def ^:dynamic *flat-batch* nil)
-(defn- flat-line [op te p r seq]
-  (str (pr-str {:tx seq :op op :l te :p p :r r :ts (fram.rt/now-ts) :by "coord"}) "\n"))
-(defn- write-flat-lines! [lines]
-  (when (and @flat-log (seq lines))
-    (with-open [os (java.io.FileOutputStream. (str @flat-log) true)]
-      (doseq [^String ln lines] (.write os (.getBytes ln "UTF-8")))
-      (.flush os)
-      ;; DURABILITY (finding #13): ONE fsync flushes the whole commit's appends before we ack {:ok}.
-      ;; In drop-in (serve-flat) mode the flat log is the ONLY durable record; .force(true) makes the
-      ;; acked write survive a crash. Batching keeps the same guarantee (whole commit fsync'd at once).
-      (.force (.getChannel os) true))
-    (reset! flat-mtime (stamp @flat-log))))
-(defn- append-flat! [op te p r seq]
-  (if *flat-batch*
-    (swap! *flat-batch* conj (flat-line op te p r seq))    ; defer — flushed once at commit end
-    (write-flat-lines! [(flat-line op te p r seq)])))       ; immediate (single-op / non-batched callers)
-(defn- flush-flat-batch! []
-  (when *flat-batch*
-    (let [t0 (System/nanoTime) lines @*flat-batch*]
-      (write-flat-lines! lines)
-      (reset! *flat-batch* [])
-      (when (= "1" (System/getenv "FRAM_PROF"))
-        (binding [*out* *err*] (println (format "  flush(fsync) n=%d %.1fms" (count lines) (/ (- (System/nanoTime) t0) 1e6))))))))
-
-;; render one live claim cid into the SAME (l-name p-str r-rendered) shape build-index
-;; wants: subject -> name, predicate -> literal, object -> literal (value) | name (ref).
-;; Returns nil for a schema-pred OR resolve-pred claim (both excluded from the read view).
-;; The single filter point: reified->claims, lp-live-triples, AND the warm cache all
-;; funnel through here, so filtering BOTH sets here is what keeps the DERIVED refers_to
-;; + render markers (materialized over `co` for :callers) invisible to :query, the
-;; :warm-check tripwire, and the read view — the corpus :query sees is exactly the AST
-;; claims the flat log ingested, identical whether or not refers_to has been materialized.
-(defn- claim->triple [st cid]
-  (let [cl (c/claim-of st cid) pstr (c/literal st (:p cl))]
-    (when-not (or (schema-preds pstr) (resolve-preds pstr) (read-hidden-preds pstr))
-      [(s/name-of st (:l cl)) pstr
-       (if (c/value-object? st (:r cl)) (c/literal st (:r cl)) (s/name-of st (:r cl)))])))
-
-;; read-bridge: reified live view -> the flat (l p r) Claim vec build-index wants.
-(defn reified->claims [c0]
-  (let [st (:store c0)]
-    (->> (c/current-claims st)
-         (keep (fn [cid] (when-let [t (claim->triple st cid)] (ck/->Claim (nth t 0) (nth t 1) (nth t 2)))))
-         vec)))
-
-;; The live (l p r) triples on ONE (te-name, p-str) group, projected exactly as
-;; reified->claims would — the authoritative post-commit state of just that group.
-;; Empty when te/p don't resolve or p is a schema-pred. Bounded by the group's
-;; cardinality (1 for a single-valued pred), so reconciling against it is cheap.
-(defn- lp-live-triples [c0 te p]
-  (let [st (:store c0) lid (s/resolve-name st te) pid (c/value-id st p)]
-    (if (and lid pid (not (schema-preds p)))
-      (set (keep #(claim->triple st %) (c/by-lp st lid pid)))
-      #{})))
-
-;; ---- index-accelerated read path (warm) ------------------------------------
-;; The scan path (fram.query/run) pulls the WHOLE "triple" relation per literal
-;; (datalog match-lit). For the common shape — ONE non-recursive rule whose body is
-;; "triple" literals with bound predicate+object — we instead probe a by-[p r] index.
-;; The index is STRING-KEYED and built from the SAME claims the scan sees, so it is
-;; provably a regrouping of the scan's own tuples: NO int<->string translation, hence
-;; no silent-mistranslation hazard. q/run stays the untouched ORACLE; anything not of
-;; the simple shape (recursion, negation, derived rels, unbound p/r) falls back to it.
-;; A by-[l p] index is carried ALONGSIDE by-[p r]: it scopes the delta to the
-;; (l,p) group a write touches, so a single-valued assert that SUPERSEDES the prior
-;; value can drop the victim without scanning the corpus (see apply-commit-delta!).
-(defn- idx-build [claims]
-  (reduce (fn [acc c]
-            (let [t [(:l c) (:p c) (:r c)]]
-              (-> acc (update :triples conj t)
-                  (update-in [:by-pr [(:p c) (:r c)]] (fnil conj #{}) t)
-                  (update-in [:by-lp [(:l c) (:p c)]] (fnil conj #{}) t))))
-          {:triples #{} :by-pr {} :by-lp {}} claims))
-;; Drop a key whose bucket emptied (DON'T leave it mapped to #{}) — idx-build never
-;; emits an empty-set entry, it just omits the key, so the incremental index must do
-;; the same or its REPRESENTATION drifts from a fresh fold (warm-check :by-pr-eq
-;; false: equal triple-set, dangling empty bucket — queries stay correct since
-;; lit-candidates treats #{} and an absent key identically, but the tripwire fires).
-(defn- bucket-update [m k v]
-  (let [nb (disj (get m k #{}) v)] (if (empty? nb) (dissoc m k) (assoc m k nb))))
-;; O(1) delta maintenance on the triple set + both indexes (sets => add/remove + dedup).
-(defn- idx-add [idx t]
-  (-> idx (update :triples conj t)
-      (update-in [:by-pr [(nth t 1) (nth t 2)]] (fnil conj #{}) t)
-      (update-in [:by-lp [(nth t 0) (nth t 1)]] (fnil conj #{}) t)))
-(defn- idx-del [idx t]
-  (-> idx (update :triples disj t)
-      (update :by-pr (fn [m] (bucket-update m [(nth t 1) (nth t 2)] t)))
-      (update :by-lp (fn [m] (bucket-update m [(nth t 0) (nth t 1)] t)))))
-
-(defn- var-term? [t] (and (map? t) (contains? t :var)))
-(defn- unify1 [arg val s]
-  (if (var-term? arg)
-    (let [k (:var arg) b (get s k ::none)]
-      (if (= b ::none) (assoc s k val) (if (= b val) s nil)))
-    (if (= arg val) s nil)))
-(defn- unify-tuple [args tup s]
-  (if (not= (count args) (count tup)) nil
-    (loop [a args t tup acc s]
-      (cond (nil? acc) nil (empty? a) acc
-            :else (recur (rest a) (rest t) (unify1 (first a) (first t) acc))))))
-(defn- resolve-arg [arg s] (if (var-term? arg) (get s (:var arg) ::unbound) arg))
-;; candidate tuples for a "triple" literal: by-pr probe when BOTH p,r ground, else scan.
-(defn- lit-candidates [idx litt s]
-  (let [args (:args litt)
-        p (resolve-arg (nth args 1) s) r (resolve-arg (nth args 2) s)]
-    (if (and (not= p ::unbound) (not= r ::unbound))
-      (get (:by-pr idx) [p r] [])
-      (:triples idx))))
-(defn- eval-body-idx [idx body]
-  (reduce (fn [substs litt]
-            (reduce (fn [acc s]
-                      (reduce (fn [a tup] (let [s2 (unify-tuple (:args litt) tup s)]
-                                            (if s2 (conj a s2) a)))
-                              acc (lit-candidates idx litt s)))
-                    [] substs))
-          [{}] body))
-(defn- ground-head [args s] (mapv (fn [t] (if (var-term? t) (get s (:var t)) t)) args))
-;; the simple shape the index serves; everything else -> q/run (the oracle).
-(defn- simple-query? [q]
-  (and (map? q) (not (contains? q :strata)) (vector? (:rules q)) (= 1 (count (:rules q)))
-       (let [rule (first (:rules q)) body (:body rule)]
-         (and (map? rule) (vector? body) (seq body)
-              (not= (:rel (:head rule)) "triple")
-              (every? (fn [l] (and (map? l) (= "triple" (:rel l)) (not (:neg l))
-                                   (vector? (:args l)) (= 3 (count (:args l))))) body)))))
-;; index-accelerated run — SAME validation boundary as q/run, SAME head-tuple set.
-(defn- idx-run [idx q]
-  (let [errs (q/validate q)]
-    (if (seq errs) {:error errs}
-      (let [rule (first (:rules q))
-            substs (eval-body-idx idx (:body rule))
-            tuples (reduce (fn [acc s] (conj acc (ground-head (:args (:head rule)) s))) #{} substs)]
-        {:ok (vec tuples)}))))
-
-;; warm read cache kept CONSISTENT with the coordinator under writes (the live write
-;; path): whole-rebuild on a cold/divergent version, then O(1) incremental delta-apply
-;; on each in-lockstep commit — so a write no longer forces an O(corpus) reprojection
-;; (the swarm write-ceiling). :claims is a SET of Claims (O(1) add/remove); :idx is the
-;; triple-set + by-[p r]; :index (kernel, for :validate) is lazy/whole, off the hot path.
-(defn warm! []
-  (let [v (current-seq @co)]
-    (when (not= v (:version @cache))
-      (let [claims (reified->claims @co)]
-        (reset! cache {:claims (set claims) :idx (idx-build claims) :index nil :version v})))
-    @cache))
-(defn index! []
-  (let [c (warm!)]
-    (or (:index c) (let [ix (ck/build-index (vec (:claims c)))] (swap! cache assoc :index ix) ix))))
-(defn warm-claims [] (vec (:claims (warm!))))
-(defn warm-idx [] (:idx (warm!)))
-;; apply a just-committed (te p) edit to the warm cache IFF the cache was current as of
-;; the pre-commit seq; else invalidate so the next warm! whole-rebuilds (correctness
-;; floor — incremental only when provably in lockstep). We reconcile the whole (te,p)
-;; GROUP against the store's authoritative post-commit live set rather than applying
-;; the wire tuple alone: a single-valued ASSERT also SUPERSEDES the prior value, so
-;; applying only the new tuple left the superseded victim live in the cache (warm !=
-;; cold — a genuine cache bug the gate's supersede step caught). Group-reconcile drops
-;; the victim AND adds the new tuple in one correct step, op-agnostically (assert /
-;; retract / supersede / ref all flow through it). Cost is O(group cardinality) — the
-;; cache's by-[l p] gives the old group, the store gives the new — not O(corpus).
-(defn apply-commit-delta! [pre te p]
-  (let [post (current-seq @co)]
-    (when (> post pre)
-      (swap! cache
-        (fn [c]
-          (if (= (:version c) pre)
-            (let [old (get-in c [:idx :by-lp] {})
-                  old-g (get old [te p] #{})                ; cache's tuples on (te,p)
-                  new-g (lp-live-triples @co te p)          ; store's live tuples on (te,p)
-                  to-del (clojure.set/difference old-g new-g)
-                  to-add (clojure.set/difference new-g old-g)
-                  idx' (as-> (:idx c) ix
-                         (reduce idx-del ix to-del)
-                         (reduce idx-add ix to-add))
-                  claims' (as-> (:claims c) cs
-                            (reduce (fn [s t] (disj s (ck/->Claim (nth t 0) (nth t 1) (nth t 2)))) cs to-del)
-                            (reduce (fn [s t] (conj s (ck/->Claim (nth t 0) (nth t 1) (nth t 2)))) cs to-add))]
-              {:claims claims' :idx idx' :index nil :version post})
-            (assoc c :version -1)))))))
-
-;; Subscriber delivery is BEST-EFFORT and OFF the write path (finding #3): a slow
-;; or stuck subscriber (TCP send buffer full) must NOT stall commits, which run
-;; under dlock. We hand the event to a single-threaded executor so the committing
-;; thread returns immediately; delivery happens later and a wedged subscriber only
-;; backs up the (unbounded, but commit-independent) notify queue, never dlock.
-;; A subscriber whose .write/.flush throws (or whose socket SO_TIMEOUT trips) is
-;; dropped. Single thread = events stay ordered.
-(def ^:private notify-exec
-  (java.util.concurrent.Executors/newSingleThreadExecutor
-   (reify java.util.concurrent.ThreadFactory
-     (newThread [_ r] (doto (Thread. r "cnf-notify") (.setDaemon true))))))
-
-(defn- notify-subs! [event]
-  (let [line (str (pr-str event) "\n")]
-    (.execute notify-exec
-      (fn []
-        (reset! subscribers
-                (vec (filter (fn [w]
-                               (try (.write ^BufferedWriter w line) (.flush ^BufferedWriter w) true
-                                    (catch Throwable _ false)))
-                             @subscribers)))))))
-
-;; ref-shape? — is a STRING value a node reference (a link), vs a literal that
-;; merely starts with '@'? The convention is "@-prefixed => ref", but a bare "@"
-;; or "@ " is a legitimate LITERAL (e.g. a comment lexeme discussing the `@id`
-;; syntax — tools.bclj/import.bclj/main.bclj all carry one). A real reference —
-;; a thread id (@2026-06-15-150040) or a code node-name (@mod#123) — is "@" + at
-;; least one char AND contains NO whitespace (ids/node-names are whitespace-free by
-;; construction). So: starts with '@', length > 1, no whitespace. This closes a
-;; render-from-log fidelity hole where "@" was mis-stored as a link to a phantom
-;; node, and the renderer then got an entity-id where it expected the string "@".
-(defn- ref-shape? [^String s]
-  (and (> (.length s) 1)
-       (= \@ (.charAt s 0))
-       (not (re-find #"\s" s))))
-
-;; kind from the value: a ref-shaped @-string => ref (link), else literal (assert)
-;; — exactly the convention the migration loader uses, so daemon writes stay
-;; consistent with the migrated store.
-(defn- kind-of [r] (if (and (string? r) (ref-shape? r)) :link :assert))
-
-;; reserved engine predicates (identity + metadata) — a DOMAIN write to one would
-;; collide with the reified schema layer and silently corrupt; reject at the boundary.
-(defn- do-assert [te p r base]
-  (if (schema-preds p)
-    {:reject [(str "reserved predicate '" p "' (engine-internal; use a domain predicate)")] :version (current-seq @co)}
-    (let [pre (current-seq @co)
-          res (commit! @co "coord" te p (kind-of r) r base)]
-      (if (:ok res)
-        (do (when-not (:idempotent res)
-              (append-flat! "assert" te p r (:ok res))
-              (apply-commit-delta! pre te p)
-              (mark-dirty! te))                    ; S3.3: this module's refers_to are stale
-            (notify-subs! {:event :commit :version (:ok res) :op "assert" :l te :p p :r r})
-            {:ok (:ok res)})
-        {:reject (:reject res) :version (:version res)}))))
-
-(defn- do-retract [te p r base]
-  (if (schema-preds p)
-    {:reject [(str "reserved predicate '" p "'")] :version (current-seq @co)}
-    (let [pre (current-seq @co)
-          res (retract! @co "coord" te p r base)]
-      (if (:ok res)
-        (do (append-flat! "retract" te p r (:ok res))
-            (apply-commit-delta! pre te p)
-            (mark-dirty! te)                        ; S3.3: this module's refers_to are stale
-            (notify-subs! {:event :commit :version (:ok res) :op "retract" :l te :p p :r r})
-            {:ok (:ok res)})
-        {:reject (:reject res) :version (:version res)}))))
-
-;; §1.2: ready/blocked/leverage are DOMAIN projections — the engine no longer
-;; serves them. The CLI/MCP fold the log locally (main/cmd-ready, cmd-json), so
-;; these daemon ops were vestigial wire-protocol surface. Dropped along with the
-;; fram.projections require → the daemon depends on no domain code. (:validate
-;; stays: it's kernel-level structural integrity, not lifecycle.)
-(defn- all-violations [idx]
-  (->> (ck/thread-ids-i idx)
-       (mapcat (fn [te] (map #(str (subs te 1) ": " %) (ck/violations-i idx te))))
-       vec))
 
 ;; ============================================================================
 ;; :callers — warm scope-correct callers of a binding, from refers_to over `co`.
@@ -468,17 +170,6 @@
                          (update :idx-by-pr drop-from))))))
      (count victims))))
 
-;; node-ids whose @<mod># name-prefix is in `mods` — the subject scope for a scoped
-;; strip AND the membership test the resolver's module-set walk mirrors. Computed
-;; straight off the store's `name` claims (the same source corpus-from-store! groups by).
-(defn- module-node-ids [st mods]
-  (let [NAME (c/value-id st "name")]
-    (when NAME
-      (set (keep (fn [cid]
-                   (let [cl (c/claim-of st cid)
-                         nm (c/literal st (:r cl))]
-                     (when (contains? mods (module-of-name nm)) (:l cl))))
-                 (c/by-p st NAME))))))
 
 ;; restore-seq-space! — the resolver opens a tx (begin-tx! bumps :next-seq + records a
 ;; :txs entry); that would bump current-seq, make refers-version chase a moving target,
@@ -712,11 +403,6 @@
                   (assoc acc r [(:l cl) pstr])
                   acc)))
             {} (:claims m))))
-(defn- node-path [psi node]
-  (loop [n node acc []]
-    (if-let [[p slot] (get psi n)]
-      (recur p (conj acc slot))
-      (vec (reverse acc)))))            ; root-down slot path
 
 ;; refers-keyset: over a store whose refers_to is materialized, the SET of stable keys
 ;; — one per live refers_to edge. Each key: [referencing-module ref-rendered-name
@@ -813,65 +499,6 @@
 ;; or {:reject ...}. The minimal-op result is BYTE-IDENTICAL (render(log)) to the
 ;; whole-module path for the same edit — same outcome, minimal mechanism.
 ;; ============================================================================
-;; the emit-edn AST vocabulary — the predicates a code subtree is made of. A code
-;; delta NEVER touches a non-AST pred (name/cardinality are schema; refers_to et al.
-;; are derived). Mirrors bin/fram-commit-code ast-pred? exactly.
-(defn- ast-pred-str? [p]
-  (or (#{"kind" "v" "child" "tail" "style" "placement"} p)
-      (boolean (and (string? p)
-                    (or (re-matches #"f\d+(?:\.\d+)*~(?:\d+|PENDING)" p)   ; #36: new CRDT position key (incl PENDING tie)
-                        (re-matches #"(?:f|seg|comment)\d+" p))))))         ; old f<int> + seg/comment (dual)
-
-;; next free @<mod>#<int> for a module, from the store's existing `name` claims. New
-;; minted nodes are numbered ABOVE every existing int so they never collide with an
-;; ingested node id (or another concurrent edit's nodes, once that edit is committed —
-;; each fresh mint reads the current max, and commits serialize under dlock).
-(defn- next-module-int [st module]
-  (let [NAME (c/value-id st "name")
-        pfx  (str "@" module "#")
-        mx   (if NAME
-               (reduce (fn [acc cid]
-                         (let [nm (c/literal st (:r (c/claim-of st cid)))]
-                           (if (and (string? nm) (str/starts-with? nm pfx))
-                             (if-let [[_ d] (re-matches #"@[^#]+#(\d+)" nm)]
-                               (max acc (parse-long d)) acc)
-                             acc)))
-                       0 (c/by-p st NAME))
-               0)]
-    (inc mx)))
-
-;; SERIALIZED node-name allocation (Build A). Clone-side next-module-int RACES: two
-;; same-base edits read the same local max and mint identical @mod#int names -> collision
-;; under true concurrency (proven). This atomic counter, seeded above the GLOBAL max at
-;; boot, hands DISJOINT name-int ranges to concurrent edits by construction (swap! atomic),
-;; so minting needs no global write-lock — the per-(te,p) OCC carries the rest.
-(def node-name-seq (atom 0))
-(defn- global-max-name-int [st]
-  (let [NAME (c/value-id st "name")]
-    (if NAME
-      (reduce (fn [acc cid]
-                (let [nm (c/literal st (:r (c/claim-of st cid)))]
-                  (if-let [[_ d] (and (string? nm) (re-matches #"@[^#]+#(\d+)" nm))]
-                    (max acc (parse-long d)) acc)))
-              0 (c/by-p st NAME))
-      0)))
-(defn- seed-name-seq! [st] (reset! node-name-seq (global-max-name-int st)))
-(defn- reserve-name-ints! [n]                 ; atomically reserve n consecutive name-ints
-  (let [hi (swap! node-name-seq + n)] (vec (range (inc (- hi n)) (inc hi)))))
-
-;; CRDT (commute, #36): the verb computes the ORDER PATH on the lock-free clone
-;; (ord-append / ord-between) and mints the position predicate "f<path>~PENDING". Here
-;; we set the TIE to the new node's ATOMIC name-int (the :r-node's @mod#<int>, already
-;; allocated by reserve-name-ints!) — the positional analog of name allocation. Two
-;; concurrent same-gap inserts share the path but get DISTINCT ties -> distinct keys ->
-;; BOTH land, ordered by tie (commute). This generalizes D (append) to insert-anywhere.
-(defn- allocate-positions [asserts]
-  (mapv (fn [[te p r :as op]]
-          (if (and (string? p) (str/ends-with? p "~PENDING"))
-            (let [tie (or (some-> (re-matches #"@[^#]+#(\d+)" (str r)) second) "0")]
-              [te (str (subs p 0 (- (count p) (count "PENDING"))) tie) r])
-            op))
-        asserts))
 
 ;; #(a) O(1) rename precondition: before renaming a def, PERSIST a durable bound_to edge from
 ;; every reference of it to the def's stable @mod#int. The rename then changes only the binding's
@@ -1027,7 +654,7 @@
         ;; BATCH the flat-log appends: collect every claim's line, write+fsync ONCE at the end
         ;; (1 fsync per commit, not per claim). do-assert/do-retract still update the warm store
         ;; per op; only the durable-log fsync is batched — same durable-before-ack guarantee.
-        (binding [*flat-batch* (atom [])]
+        (binding [cd/*flat-batch* (atom [])]
          (doseq [[te p r] retracts :while (nil? @rej)]
            (let [res (do-retract te p r v0)] (when (:reject res) (reset! rej {:op :retract :te te :p p :r r :res res}))))
          ;; r is already a wire value: a name STRING (ref, for fN/child/tail/...) or a
@@ -1204,7 +831,7 @@
         (when-let [line (read-line-bounded r max-line-bytes)]
           (let [req (parse-req line)]
             (if (= (:op req) :subscribe)
-              (do (swap! subscribers conj w)
+              (do (fram.rt/subscribe! w)
                   ;; A subscriber is long-lived: it RECEIVES pushed events and sends
                   ;; nothing, so the request-path read timeout (5s) must NOT apply or
                   ;; it would drop every idle subscriber. Disable it for this socket;
