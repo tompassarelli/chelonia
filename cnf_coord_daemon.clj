@@ -79,6 +79,10 @@
 ;; record that a commit touched te's module (te is "@mod#int"); skip non-AST te.
 (defn- mark-dirty! [te]
   (when-let [m (module-of-name te)] (swap! dirty-modules conj m)))
+;; The incremental corpus cache (ensure-corpus-groups! below) — declared here so the reload-reset
+;; can invalidate it; the fns that use it are defined after with-resolve-read.
+(def corpus-groups (atom nil))    ; {module-src -> [entity-ids]} | nil (cold/invalidated)
+
 ;; reset all S3.3 derived state — called when `co` is REBUILT wholesale (boot /
 ;; external flat reload): the in-memory refers_to + export snapshot belong to the OLD
 ;; store, so the next materialize must be a fresh cold whole-corpus pass.
@@ -87,7 +91,8 @@
   (reset! export-snapshot {})
   (reset! materialized? false)
   (reset! refers-version -1)
-  (reset! last-materialize nil))
+  (reset! last-materialize nil)
+  (reset! corpus-groups nil))
 
 ;; ---- DoS hardening knobs (findings #2/#5/#19/#20) --------------------------
 ;; Read timeout on every accepted socket — mirrors the CLIENT side (fram.rt
@@ -153,18 +158,33 @@
 ;; line the CLI's cold fold reads — so "files are pure projections of the reified
 ;; store" (Stage 7) and existing reads keep working UNCHANGED across the cutover.
 ;; Refreshes flat-mtime so our OWN write isn't mistaken for an external edit.
-(defn- append-flat! [op te p r seq]
-  (when @flat-log
+;; flat-log batching: a multi-claim commit collects its lines and writes+fsyncs ONCE (1 fsync per
+;; commit, NOT per claim — the per-claim fsync was the dominant authoring cost, ~13 fsyncs/def).
+;; *flat-batch* (an atom of line-strings) is bound around a commit; nil => write immediately.
+(def ^:dynamic *flat-batch* nil)
+(defn- flat-line [op te p r seq]
+  (str (pr-str {:tx seq :op op :l te :p p :r r :ts (fram.rt/now-ts) :by "coord"}) "\n"))
+(defn- write-flat-lines! [lines]
+  (when (and @flat-log (seq lines))
     (with-open [os (java.io.FileOutputStream. (str @flat-log) true)]
-      (.write os (.getBytes (str (pr-str {:tx seq :op op :l te :p p :r r :ts (fram.rt/now-ts) :by "coord"}) "\n") "UTF-8"))
+      (doseq [^String ln lines] (.write os (.getBytes ln "UTF-8")))
       (.flush os)
-      ;; DURABILITY (finding #13): fsync the append before we acknowledge {:ok}.
-      ;; In drop-in (serve-flat) mode the v2-log append-tx!/fsync path is dead
-      ;; (:log nil), so the flat log is the ONLY durable record — without .force,
-      ;; a crash after .flush but before the OS writeback loses an already-acked
-      ;; commit. .force(true) flushes data to disk so the acked write survives.
+      ;; DURABILITY (finding #13): ONE fsync flushes the whole commit's appends before we ack {:ok}.
+      ;; In drop-in (serve-flat) mode the flat log is the ONLY durable record; .force(true) makes the
+      ;; acked write survive a crash. Batching keeps the same guarantee (whole commit fsync'd at once).
       (.force (.getChannel os) true))
     (reset! flat-mtime (stamp @flat-log))))
+(defn- append-flat! [op te p r seq]
+  (if *flat-batch*
+    (swap! *flat-batch* conj (flat-line op te p r seq))    ; defer — flushed once at commit end
+    (write-flat-lines! [(flat-line op te p r seq)])))       ; immediate (single-op / non-batched callers)
+(defn- flush-flat-batch! []
+  (when *flat-batch*
+    (let [t0 (System/nanoTime) lines @*flat-batch*]
+      (write-flat-lines! lines)
+      (reset! *flat-batch* [])
+      (when (= "1" (System/getenv "FRAM_PROF"))
+        (binding [*out* *err*] (println (format "  flush(fsync) n=%d %.1fms" (count lines) (/ (- (System/nanoTime) t0) 1e6))))))))
 
 ;; render one live claim cid into the SAME (l-name p-str r-rendered) shape build-index
 ;; wants: subject -> name, predicate -> literal, object -> literal (value) | name (ref).
@@ -602,6 +622,24 @@
       (reset! last-materialize r))
     :else nil))
 
+;; ============================================================================
+;; INCREMENTAL CORPUS CACHE (per-verb O(edited-module), not O(total-app))
+;; ============================================================================
+;; corpus-from-store! otherwise reduces over EVERY name claim in the whole store on EVERY commit
+;; (O(total-app)) — the dominant per-op authoring cost for medium/large apps. But module-defs /
+;; forms-of / wrapper-of only read each module's STABLE `beagle-file` wrapper eid (which never
+;; changes across commits) plus that wrapper's children FROM THE STORE (always current). So the
+;; module->entity-ids map can be seeded ONCE and reused: edits into existing modules need no
+;; update (new defs are read off the wrapper's store children), and the verb skips the O(total)
+;; reduce. Re-seed only when the target module is absent (a brand-new module) or after a reload.
+;; (corpus-groups atom is declared above, near reset-refers-state!, so reload can invalidate it.)
+(defn ensure-corpus-groups! [module]
+  (when (or (nil? @corpus-groups) (not (contains? @corpus-groups module)))
+    (with-resolve-read (:store @co)        ; cold corpus-from-store! (the full reduce) -> file->ents
+      (reset! corpus-groups @resolve/file->ents)))
+  @corpus-groups)
+(defn invalidate-corpus-groups! [] (reset! corpus-groups nil))
+
 ;; resolve a target binding spec to its node entity-id in `co`. Accepts a direct node
 ;; name "@mod#id", OR a (module name) pair resolved via the def-binding tables (value
 ;; OR type defs) the resolver builds from the warm corpus — the SAME resolution the
@@ -903,13 +941,19 @@
           ;; A REJECTED edit must NOT kill the daemon: bind *reject!* to THROW (the CLI
           ;; default exits the process). The throw unwinds the verb + is caught by the
           ;; :edit-min handler arm, returning {:reject ...} to the client.
-          _      (binding [resolve/*reject!*
-                           (fn [code] (throw (ex-info (str "verb rejected the edit (code " code ")")
-                                                      {:reject :verb :code code})))
-                           resolve/*capture-only?* true   ; mint/supersede only — no re-resolve, no EDN projection
-                           resolve/*resolve-walk?* false  ; Build B: skip the whole-corpus walk (set-body/upsert-form need no refers_to; rename reads the pre-materialized edges)
-                           resolve/*corpus-scope* scope]  ; Build B: scope frames to the edited module (single-module verbs)
-                   (resolve/run-verb-warm! clone spec))
+          _      (let [tv0 (System/nanoTime)
+                       res (binding [resolve/*reject!*
+                                     (fn [code] (throw (ex-info (str "verb rejected the edit (code " code ")")
+                                                                {:reject :verb :code code})))
+                                     resolve/*capture-only?* true   ; mint/supersede only — no re-resolve, no EDN projection
+                                     resolve/*resolve-walk?* false  ; Build B: skip the whole-corpus walk
+                                     resolve/*corpus-scope* scope    ; Build B: scope frames to the edited module
+                                     resolve/*corpus-cache* (when scope? (ensure-corpus-groups! module))]  ; skip O(total) name reduce
+                             (resolve/run-verb-warm! clone spec))]
+                   (when (= "1" (System/getenv "FRAM_PROF"))
+                     (binding [*out* *err*] (println (format "PROF run-verb-warm!=%.1fms" (/ (- (System/nanoTime) tv0) 1e6)))))
+                   res)
+          t-hv   (System/nanoTime)
           m      @clone
           sup-pid (:supersedes-pred m)
           ;; Build B — O(delta), not O(corpus): a clone shares ONE monotonic :next-id
@@ -959,7 +1003,8 @@
                                 (when-let [vcl (get (:claims m) vcid)]
                                   (when (ast-pred-str? (c/literal clone (:p vcl)))
                                     (->wire vcl))))
-                              victim-cids))]
+                              victim-cids))
+          t-cm (System/nanoTime)]
       ;; commit through the REAL coordinator wire. Retract old edges first, then
       ;; assert leaves (kind/v) before parent fN re-points. Each op is OCC-checked at
       ;; the current version of its OWN (te,p) group (commit! base-version), so two
@@ -979,16 +1024,23 @@
        (let [v0 (current-seq @co)
              asserts (allocate-positions asserts)  ; CRDT (#36): set PENDING ties to new nodes' atomic name-ints -> concurrent same-gap inserts get distinct keys, both land (commute)
              rej (atom nil)]
-        (doseq [[te p r] retracts :while (nil? @rej)]
-          (let [res (do-retract te p r v0)] (when (:reject res) (reset! rej {:op :retract :te te :p p :r r :res res}))))
-        ;; r is already a wire value: a name STRING (ref, for fN/child/tail/...) or a
-        ;; literal STRING (kind/v). do-assert's kind-of picks :link vs :assert by the
-        ;; ref-shape of the string — exactly the migrate-flat->co convention.
-        (let [leaf? (fn [[_ p _]] (#{"kind" "v"} p))
-              ordered (concat (filter leaf? asserts) (remove leaf? asserts))]
-          (doseq [[te p r] ordered :while (nil? @rej)]
-            (let [res (do-assert te p r v0)]
-              (when (:reject res) (reset! rej {:op :assert :te te :p p :r r :res res})))))
+        ;; BATCH the flat-log appends: collect every claim's line, write+fsync ONCE at the end
+        ;; (1 fsync per commit, not per claim). do-assert/do-retract still update the warm store
+        ;; per op; only the durable-log fsync is batched — same durable-before-ack guarantee.
+        (binding [*flat-batch* (atom [])]
+         (doseq [[te p r] retracts :while (nil? @rej)]
+           (let [res (do-retract te p r v0)] (when (:reject res) (reset! rej {:op :retract :te te :p p :r r :res res}))))
+         ;; r is already a wire value: a name STRING (ref, for fN/child/tail/...) or a
+         ;; literal STRING (kind/v). do-assert's kind-of picks :link vs :assert by the
+         ;; ref-shape of the string — exactly the migrate-flat->co convention.
+         (let [leaf? (fn [[_ p _]] (#{"kind" "v"} p))
+               ordered (concat (filter leaf? asserts) (remove leaf? asserts))]
+           (doseq [[te p r] ordered :while (nil? @rej)]
+             (let [res (do-assert te p r v0)]
+               (when (:reject res) (reset! rej {:op :assert :te te :p p :r r :res res})))))
+         (flush-flat-batch!))                          ; ONE fsync for the whole commit's appends
+        (when (= "1" (System/getenv "FRAM_PROF"))
+          (binding [*out* *err*] (println (format "PROF harvest=%.1fms commit=%.1fms" (/ (- t-cm t-hv) 1e6) (/ (- (System/nanoTime) t-cm) 1e6)))))
         (if @rej
           {:reject (:res @rej) :failed-op @rej :module module}
           {:ok true :module module

@@ -62,7 +62,11 @@
 (defn base-version [co te pid]
   (reduce max 0 (map #(seq-of co %) (live-cids-lp co te pid))))
 (defn current-seq [co]
-  (let [m @(store co)] (reduce max 0 (map (fn [[_ v]] (:seq v)) (:txs m)))))
+  ;; O(1): :next-seq is the monotonic seq counter — begin-tx! does (update :next-seq inc) and
+  ;; assigns the result as the tx's :seq, so the LAST-assigned seq == the MAX seq == :next-seq.
+  ;; The old (reduce max ... (:txs m)) was O(total-commits) and, called ~37x per authoring op,
+  ;; was the residual O(total) authoring cost (per-op grew 14->61ms over a 500-def build).
+  (or (:next-seq @(store co)) 0))
 
 (defn- ent! [co tx nm]
   (or (s/resolve-name (store co) nm)

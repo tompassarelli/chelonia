@@ -60,6 +60,13 @@
 ;; modules' frames is waste. nil => full frames for every module (verbatim behavior;
 ;; rename, which walks consumers' require/frame tables cross-module, leaves it nil).
 (def ^:dynamic *corpus-scope* nil)
+;; *corpus-cache* — when bound (by the daemon), the module->entity-ids map to use INSTEAD of the
+;; O(total) name-claim reduce in corpus-from-store!. The daemon maintains it incrementally (add the
+;; commit's new named nodes to their module — O(delta)), so the per-verb corpus build drops from
+;; O(total-app) to O(edited-module-frame). Valid because the verb's clone == the committed store at
+;; clone time, which the cache reflects. nil => full reduce (cold path, reads, the CLI). Just the
+;; `groups` map (module-src -> [entity-ids]); frames are still derived (scoped) from it.
+(def ^:dynamic *corpus-cache* nil)
 (def ^:dynamic file->ents (atom {}))
 
 (defn load-edn [path]
@@ -704,15 +711,20 @@
 ;; read @file->ents + ctx, which now ARE the warm store). `set!` (not root) so
 ;; nothing leaks past the binding scope, exactly like resolve-edn!.
 (defn corpus-from-store! []
-  (let [NAME   (c/value-id ctx "name")            ; the daemon's node-name predicate
-        groups (if NAME
-                 (reduce (fn [acc cid]
-                           (let [cl (c/claim-of ctx cid)
-                                 nm (c/literal ctx (:r cl))
-                                 m  (name->module nm)]
-                             (if m (update acc m (fnil conj []) (:l cl)) acc)))
-                         {} (c/by-p ctx NAME))
-                 {})]
+  (let [t0     (System/nanoTime)
+        NAME   (c/value-id ctx "name")            ; the daemon's node-name predicate
+        groups (cond
+                 ;; INCREMENTAL CORPUS CACHE — skip the O(total) name reduce when the daemon
+                 ;; supplies the maintained module->entity-ids map (the dominant per-verb cost).
+                 (some? *corpus-cache*) *corpus-cache*
+                 NAME (reduce (fn [acc cid]
+                                (let [cl (c/claim-of ctx cid)
+                                      nm (c/literal ctx (:r cl))
+                                      m  (name->module nm)]
+                                  (if m (update acc m (fnil conj []) (:l cl)) acc)))
+                              {} (c/by-p ctx NAME))
+                 :else {})
+        t-groups (System/nanoTime)]
     (reset! file->ents groups)                    ; module-keyed entity lists
     (set! srcs (vec (keys groups)))               ; the modules ARE the srcs
     ;; SCOPED corpus (Build B): *corpus-scope* restricts the EXPENSIVE per-module FRAME
@@ -735,7 +747,12 @@
       (set! global-type-exports
             (into {} (map (fn [s] [(module-name s) (module-types s)]) (filter module-name srcs))))
       (set! global-accessor-exports
-            (into {} (map (fn [s] [(module-name s) (module-accessors s)]) (filter module-name srcs)))))))
+            (into {} (map (fn [s] [(module-name s) (module-accessors s)]) (filter module-name srcs)))))
+    (when (= "1" (System/getenv "FRAM_PROF"))
+      (binding [*out* *err*]
+        (println (format "  corpus-from-store!: groups=%.1fms frames+exports=%.1fms cached=%s nsrcs=%d scoped=%s"
+                         (/ (- t-groups t0) 1e6) (/ (- (System/nanoTime) t-groups) 1e6)
+                         (some? *corpus-cache*) (count srcs) (boolean *corpus-scope*)))))))
 
 ;; ============================================================================
 ;; S3.3 scoped-classifier helpers — computed from the BOUND warm corpus (call
