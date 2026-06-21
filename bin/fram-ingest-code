@@ -83,9 +83,20 @@
 ;; --- the flip's re-key: file-local int n -> "@<mod>#n" -----------------------
 (defn- nodename [module n] (str "@" module "#" n))
 
+;; structural REF-EDGES: an integer object is a LINK to node `o` ONLY for these preds —
+;; child / tail + the ordered slots fN / segN / commentN + the #36 CRDT position keys
+;; f<path>~tie. Any OTHER integer object is a LITERAL value (srcloc line/col/pos/span,
+;; slice-2) and must be kept verbatim, NOT re-keyed to @mod#o. (Mirrors beagle's edn-root
+;; ref detection — only fN/child/tail are refs; a numeric `pos` is not a child ref.)
+(defn- ref-edge? [p]
+  (let [s (str p)]
+    (boolean (or (#{"child" "tail"} s)
+                 (re-matches #"f\d.*" s) (re-matches #"seg\d+" s) (re-matches #"comment\d+" s)))))
+
 ;; one module's emit-edn -> flat-log claim maps (kept as data; :tx assigned later).
-;; Subject int s -> :l "@mod#s". Integer object o -> :r "@mod#o" (a LINK). String
-;; object -> :r the string (a LITERAL). Predicate passes through verbatim.
+;; Subject int s -> :l "@mod#s". Integer object o on a REF-EDGE pred -> :r "@mod#o" (a
+;; LINK); any other object -> :r verbatim (a LITERAL: string kind/v, or a NUMBER srcloc
+;; line/col/pos/span — kept numeric, NOT re-keyed). Predicate passes through verbatim.
 ;; PLUS one bookkeeping claim @<mod>#root file "<path>" so render-from-log knows the
 ;; source path (the @file wrapper analogue; "root" never collides with an int id).
 (defn- module->claims [path]
@@ -96,7 +107,7 @@
                 {:op "assert"
                  :l (nodename module s)
                  :p (str p)
-                 :r (if (integer? o) (nodename module o) (str o))})
+                 :r (if (and (integer? o) (ref-edge? p)) (nodename module o) o)})
               triples)]
     (into [{:op "assert" :l (str "@" module "#root") :p "file" :r path}]
           node-claims)))
