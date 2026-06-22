@@ -1,0 +1,68 @@
+#lang beagle/clj
+;; roundtrip_fram — load reader-level claims into a real Fram store, then
+;; re-extract them FROM the store. Proves the program persists through the
+;; engine (not just an in-memory map): source -> claims -> Fram -> claims.
+;;
+;;   racket .../claims-roundtrip.rkt --emit-edn FILE > A.edn
+;;   bb -cp ~/code/fram/out src/roundtrip_fram.clj A.edn > B.edn
+;;   racket .../claims-roundtrip.rkt --verify B.edn FILE
+;;
+;; CLI tail appended to form roundtrip_fram.clj calls (roundtrip! edn-path).
+(ns roundtrip-fram)
+(define-mode strict)
+(require clojure.edn :as edn)
+(require clojure.string :as str)
+(require fram.cnf :as c)
+
+(declare-extern fram.rt/slurp [String -> String])
+(declare-extern fram.str/split-lines [String -> (Vec String)])
+(declare-extern fram.rt/println-err! [String -> Nil])
+(declare-extern fram.pr-str [Any -> String])
+
+;; Load all claims from an EDN file into a fresh store.
+;; Objects that are integers are node-refs (map to entities); strings are leaf values.
+;; Returns {:ctx :claims-count}.
+(defn load-edn-to-store! [edn-path :- String] :- (Map Keyword Any)
+  (let [ctx       :- (Atom Any) (c/new-store)
+        tx        :- Int (c/begin-tx! ctx "code")
+        lid->ent  :- (Atom (Map Any Int)) (atom (let [e :- (Map Any Int) {}] e))
+        ent!      (fn [lid :- Any] :- Int
+                    (let [existing :- Any (get @lid->ent lid)]
+                      (if (some? existing)
+                        (let [e :- Int existing] e)
+                        (let [e :- Int (c/entity! ctx)]
+                          (swap! lid->ent (fn [m :- (Map Any Int)] :- (Map Any Int) (assoc m lid e)))
+                          e))))
+        lines     :- (Vec String) (fram.str/split-lines (fram.rt/slurp edn-path))]
+    (doseq [line :- String lines :when (str/starts-with? line "[")]
+      (let [triple :- Any (edn/read-string line)
+            tv     :- (Vec Any) (let [x :- (Vec Any) triple] x)
+            s      :- Any (nth tv 0)
+            p      :- String (let [x :- String (nth tv 1)] x)
+            o      :- Any (nth tv 2)
+            L      :- Int (ent! s)
+            P      :- Int (c/value! ctx p)
+            R      :- Int (if (integer? o) (ent! o) (c/value! ctx o))]
+        (c/claim! ctx L P R tx)))
+    {:ctx ctx :claims-count (count (c/current-claims ctx))}))
+
+;; Re-extract every live claim from the store back to EDN triple strings.
+;; value-object? distinguishes a leaf value from a node entity (int ref).
+(defn extract-claims [ctx :- (Atom Any)] :- (Vec String)
+  (mapv (fn [cid :- Int] :- String
+          (let [cl :- (Map Keyword Any) (c/claim-of ctx cid)
+                l  :- Any (:l cl)
+                p  :- Any (:p cl)
+                r  :- Any (:r cl)
+                ps :- String (c/literal ctx (if (integer? p) (let [pi :- Int p] pi) 0))]
+            (if (c/value-object? ctx (if (integer? r) (let [ri :- Int r] ri) 0))
+              (str "[" l " " (fram.pr-str ps) " " (fram.pr-str (c/literal ctx (if (integer? r) (let [ri :- Int r] ri) 0))) "]")
+              (str "[" l " " (fram.pr-str ps) " " r "]"))))
+        (c/current-claims ctx)))
+
+;; Main roundtrip entry point: load edn-path into a store, re-extract, print.
+(defn roundtrip! [edn-path :- String] :- Nil
+  (let [{:keys [ctx claims-count]} (load-edn-to-store! edn-path)]
+    (fram.rt/println-err! (str "loaded " claims-count " claims into a Fram store"))
+    (doseq [line :- String (extract-claims ctx)]
+      (println line))))

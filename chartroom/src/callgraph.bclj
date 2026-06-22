@@ -1,0 +1,204 @@
+#lang beagle/clj
+;; ============================================================================
+;; callgraph — scope-correct call-graph engine (Layer 2, on Fram).
+;; ============================================================================
+;; Derives the scope-correct call graph of a beagle source tree from its CNF
+;; claim projection, with the transitive blast radius computed by Fram Datalog.
+;; A call binds the defn in its OWN module (module-local lexical scope; else a
+;; unique global; else ambiguous/external -> dropped), so same-named functions
+;; across modules never collide — the failure mode of bare-symbol text matching.
+;;
+;; Library functions are scope-correct-vs-bare-symbol; the CLI tail appends -main
+;; (which uses cheshire for JSON) to form the runnable callgraph.clj.
+;; ============================================================================
+(ns callgraph)
+(define-mode strict)
+(require clojure.edn :as edn)
+(require clojure.string :as str)
+(require fram.cnf :as c)
+(require fram.datalog :as d)
+
+(declare-extern fram.rt/slurp [String -> String])
+(declare-extern fram.str/split-lines [String -> (Vec String)])
+(declare-extern fram.rt/println-err! [String -> Nil])
+
+;; A block parsed from beagle-claims output (one per source file).
+;; triples: raw EDN vectors [s p o] where s = entity-id (Long), p = pred-name, o = ref or literal.
+;; (Vec Any): justified — edn/read-string yields Any; the triple structure is invariant but un-typeable
+;; without a union type for Long|String (GAP-LIST: no Int|String union in current vocab).
+(defrecord Block [file :- String triples :- (Vec Any)])
+
+;; A resolved defn entry in the scope-correct call graph.
+;; key = [file-path entity-id] — a (Vec Any) because entity-ids are EDN Longs (Any post-parse).
+(defrecord DefnEntry [key :- (Vec Any) name :- String file :- String module :- String])
+
+;; A derived call graph.
+(defrecord CallGraph
+  [defns   :- (Vec DefnEntry)
+   by-name :- (Map String (Vec DefnEntry))
+   edges   :- (Vec (Vec Any))])
+
+;; Blast-radius results from Datalog.
+;; blast: callee-key -> set of caller-keys; reaches: all (caller,callee) pairs.
+;; (Map Any Any) / (Set Any): justified — keys are (Vec Any) defn-keys (GAP-LIST: no typed tuple).
+(defrecord BlastResult [blast :- (Map Any Any) reaches :- (Set Any)])
+
+;; --- parse the @file-delimited claim stream (from beagle-claims) ------------
+;; NOTE: Racket ~s emits some escapes (\e, \a, ...) that Clojure's EDN reader rejects.
+;; Those only appear in LEAF literal objects (never the call-graph predicates
+;; name/calls/child/form-kind), so we skip-and-count them — the call graph is unaffected.
+(defn parse-corpus [path :- String] :- (Vec Block)
+  (let [skips :- (Atom Int) (atom 0)
+        lines :- (Vec String) (fram.str/split-lines (fram.rt/slurp path))
+        blocks :- (Vec Block)
+          (loop [ls :- (Vec String) lines
+                 cur :- (U Block Nil) nil
+                 out :- (Vec Block) []]
+            (if (empty? ls)
+              (if (some? cur) (conj out (let [b :- Block cur] b)) out)
+              (let [l :- String (first ls)]
+                (cond
+                  [(str/starts-with? l "@file ")
+                   (let [new-cur :- Block (->Block (subs l 6) [])]
+                     (recur (vec (rest ls))
+                            new-cur
+                            (if (some? cur) (conj out (let [b :- Block cur] b)) out)))]
+                  [(str/starts-with? l "[")
+                   (let [t :- Any (try (edn/read-string l) (catch Exception _ (do (swap! skips (fn [x :- Int] :- Int (+ x 1))) nil)))]
+                     (recur (vec (rest ls))
+                            (if (some? cur)
+                              (if (some? t) (let [b :- Block cur] (->Block (:file b) (conj (:triples b) t))) cur)
+                              cur)
+                            out))]
+                  [:else (recur (vec (rest ls)) cur out)]))))]
+    (when (pos? @skips)
+      (fram.rt/println-err! (str "  (skipped " @skips " EDN-unparseable leaf literals)")))
+    blocks))
+
+;; Build an index from subject entity-id to object value for a given predicate string.
+;; triples: (Vec Any) — each element is [s p o] from EDN; s and o are Any (Long or String).
+(defn index-by [pred :- String triples :- (Vec Any)] :- (Map Any Any)
+  (reduce (fn [m :- (Map Any Any) t :- Any] :- (Map Any Any)
+            (let [tv :- (Vec Any) (let [x :- (Vec Any) t] x)
+                  s :- Any (nth tv 0)
+                  p :- Any (nth tv 1)
+                  o :- Any (nth tv 2)]
+              (if (= p pred) (assoc m s o) m)))
+          {}
+          triples))
+
+;; Extract the module name (basename without extension) from a file path.
+(defn module-of [file :- String] :- String
+  (-> file (str/split #"/") last (str/replace #"\.[^.]+$" "")))
+
+;; Derive call mentions from one file block via a DFS over `child` edges.
+;; Returns {:file :defns :mentions} where mentions are [caller-defn-key callee-name] pairs.
+;; Stack DFS: stack elements are [node cd] where cd is the nearest enclosing defn entity-id.
+(defn derive-block [block :- Block] :- (Map Keyword Any)
+  (let [ts     :- (Vec Any) (:triples block)
+        file   :- String (:file block)
+        fk     :- (Map Any Any) (index-by "form-kind" ts)
+        names  :- (Map Any Any) (index-by "name" ts)
+        calls  :- (Map Any Any) (index-by "calls" ts)
+        kids   :- (Map Any (Vec Any))
+          (reduce (fn [m :- (Map Any (Vec Any)) t :- Any] :- (Map Any (Vec Any))
+                    (let [tv :- (Vec Any) (let [x :- (Vec Any) t] x)
+                          s :- Any (nth tv 0)
+                          p :- Any (nth tv 1)
+                          o :- Any (nth tv 2)]
+                      (if (= p "child") (assoc m s (conj (get m s []) o)) m)))
+                  {}
+                  ts)
+        childset :- (Set Any)
+          (reduce (fn [s :- (Set Any) t :- Any] :- (Set Any)
+                    (let [tv :- (Vec Any) (let [x :- (Vec Any) t] x)
+                          p :- Any (nth tv 1)
+                          o :- Any (nth tv 2)]
+                      (if (= p "child") (conj s o) s)))
+                  #{}
+                  ts)
+        roots    :- (Vec Any) (vec (remove (fn [k :- Any] :- Bool (contains? childset k)) (keys fk)))
+        defns    :- (Vec DefnEntry)
+          (vec (for [[s k] fk :when (= k "defn")]
+                 (->DefnEntry [file s] (let [nm :- Any (get names s)] (if (string? nm) nm "")) file (module-of file))))
+        mentions :- (Atom (Vec Any)) (atom [])]
+    (loop [stack :- (Vec (Vec Any)) (mapv (fn [r :- Any] :- (Vec Any) [r nil]) roots)]
+      (when (seq stack)
+        (let [top  :- (Vec Any) (peek stack)
+              st   :- (Vec (Vec Any)) (pop stack)
+              node :- Any (nth top 0)
+              cd   :- Any (nth top 1)
+              cd2  :- Any (if (= (get fk node) "defn") node cd)]
+          (when (and (= (get fk node) "call") (some? cd2) (some? (get calls node)))
+            (swap! mentions (fn [v :- (Vec Any)] :- (Vec Any) (conj v [[file cd2] (get calls node)]))))
+          (recur (into st (mapv (fn [k :- Any] :- (Vec Any) [k cd2]) (get kids node [])))))))
+    {:file file :defns defns :mentions @mentions}))
+
+;; Build the scope-correct call graph from all blocks.
+;; Resolution: same-file local defn wins (module-local lexical scope); else a unique
+;; global defn; else ambiguous/external -> dropped.
+(defn build-graph [blocks :- (Vec Block)] :- CallGraph
+  (let [derived  :- (Vec (Map Keyword Any)) (mapv derive-block blocks)
+        defns    :- (Vec DefnEntry) (vec (mapcat (fn [d :- (Map Keyword Any)] :- (Vec DefnEntry) (let [v :- (Vec DefnEntry) (:defns d)] v)) derived))
+        by-name  :- (Map String (Vec DefnEntry)) (group-by (fn [e :- DefnEntry] :- String (:name e)) defns)
+        mentions :- (Vec Any) (vec (mapcat (fn [d :- (Map Keyword Any)] :- (Vec Any) (let [v :- (Vec Any) (:mentions d)] v)) derived))
+        resolve-call
+          (fn [caller-key :- (Vec Any) callname :- String] :- (U (Vec Any) Nil)
+            (let [cands  :- (Vec DefnEntry) (get by-name callname [])
+                  cfile  :- Any (first caller-key)
+                  same   :- (Vec DefnEntry) (filterv (fn [d :- DefnEntry] :- Bool (= (first (:key d)) cfile)) cands)]
+              (cond
+                [(seq same) (:key (first same))]
+                [(= 1 (count cands)) (:key (first (vec cands)))]
+                [:else nil])))
+        edges :- (Vec (Vec Any))
+          (distinct (vec (keep (fn [m :- Any] :- (U (Vec Any) Nil)
+                                  (let [mv :- (Vec Any) (let [x :- (Vec Any) m] x)
+                                        ck :- (Vec Any) (let [x :- (Vec Any) (nth mv 0)] x)
+                                        nm :- String (let [x :- String (nth mv 1)] x)
+                                        callee :- (U (Vec Any) Nil) (resolve-call ck nm)]
+                                    (when (and (some? callee) (not= ck callee))
+                                      [ck callee])))
+                               mentions)))]
+    (->CallGraph defns by-name edges)))
+
+;; Compute transitive blast radius via Fram Datalog.
+;; blast(D) = {x | x transitively calls D} = D's transitive callers (who breaks if D changes).
+(defn blast-radius [edges :- (Vec (Vec Any))] :- BlastResult
+  (let [ctx   :- (Atom Any) (c/new-store)
+        tx    :- Int (c/begin-tx! ctx "code")
+        EDGE  :- Int (c/value! ctx "calls-defn")
+        k->id :- (Atom (Map Any Any)) (atom {})
+        ent   (fn [k :- Any] :- Int
+                (let [m :- (Map Any Any) @k->id
+                      existing :- Any (get m k)]
+                  (if (some? existing)
+                    (let [e :- Int existing] e)
+                    (let [e :- Int (c/entity! ctx)]
+                      (swap! k->id (fn [m2 :- (Map Any Any)] :- (Map Any Any) (assoc m2 k e)))
+                      e))))
+        _     (doseq [edge :- Any edges]
+                (let [ev :- (Vec Any) (let [x :- (Vec Any) edge] x)
+                      a :- Any (nth ev 0)
+                      b :- Any (nth ev 1)]
+                  (c/claim! ctx (ent a) EDGE (ent b) tx)))
+        id->k :- (Map Any Any) (into {} (map (fn [kv :- Any] :- (Vec Any) (let [pair :- (Vec Any) (let [x :- (Vec Any) kv] x)] [(nth pair 1) (nth pair 0)])) @k->id))
+        db    :- Any
+          (d/run-rules ctx
+            [(d/rule "reaches" [(d/v :x) (d/v :y)]
+                     [(d/lit "triple" [(d/v :x) EDGE (d/v :y)])])
+             (d/rule "reaches" [(d/v :x) (d/v :z)]
+                     [(d/lit "triple" [(d/v :x) EDGE (d/v :y)])
+                      (d/lit "reaches" [(d/v :y) (d/v :z)])])])
+        reaches :- (Set Any) (set (d/facts db "reaches"))
+        blast   :- (Map Any Any)
+          (reduce (fn [m :- (Map Any Any) pair :- Any] :- (Map Any Any)
+                    (let [pv :- (Vec Any) (let [x :- (Vec Any) pair] x)
+                          xid :- Any (nth pv 0)
+                          yid :- Any (nth pv 1)
+                          ykey :- Any (get id->k yid)
+                          xkey :- Any (get id->k xid)]
+                      (assoc m ykey (conj (get m ykey #{}) xkey))))
+                  {}
+                  reaches)]
+    (->BlastResult blast reaches)))

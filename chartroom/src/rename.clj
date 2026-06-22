@@ -1,128 +1,131 @@
-#!/usr/bin/env bb
-;; ============================================================================
-;; Turtle #4 — graph-native authoring: a SCOPE-CORRECT rename as a claim edit.
-;; ============================================================================
-;; Loads two modules' reader-claims into ONE Fram store, then renames a symbol
-;; in ONE module by SUPERSEDING its `v` claims (claim-native: nothing is
-;; overwritten — the old claims stay, marked not-live, fully recoverable). The
-;; other module's identically-named symbol is untouched. Re-projects each file's
-;; (mutated) source. A text `sed` rename would corrupt both files; the graph
-;; edit is correct by construction because scope is structural, not lexical.
-;;
-;;   bb -cp ~/code/fram/out src/rename.clj <old> <new> <target-substr> <edn>...
 (ns rename
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [fram.cnf :as c]))
 
-(def argv *command-line-args*)
-(def old-name (nth argv 0))
-(def new-name (nth argv 1))
-(def target-substr (nth argv 2))
-(def edn-files (drop 3 argv))
-
-(def ctx (c/new-store))
-(def tx  (c/begin-tx! ctx "author"))
-(def SUP (c/value! ctx "supersedes"))
-(c/set-supersedes-pred! ctx SUP)
-
-(def file->ents (atom {}))           ; src-path -> [entities]
-
-(defn load-edn [path]
-  (let [lines (str/split-lines (slurp path))
-        src   (-> (first (filter #(str/starts-with? % "@file") lines)) (subs 6))
-        local (atom {})
-        ent   (fn [lid] (or (@local lid)
-                            (let [e (c/entity! ctx)]
-                              (swap! local assoc lid e)
-                              (swap! file->ents update src (fnil conj []) e)
-                              e)))]
-    (doseq [line lines :when (str/starts-with? line "[")]
-      (let [[s p o] (edn/read-string line)
-            L (ent s) P (c/value! ctx p)
-            R (if (integer? o) (ent o) (c/value! ctx o))]
-        (c/claim! ctx L P R tx)))
-    src))
-
-(def srcs (mapv load-edn edn-files))
-
-;; --- the edit: rename `old` -> `new` for symbol leaves in the target file ----
-(def Vp   (c/value! ctx "v"))
-(def KIND (c/value! ctx "kind"))
-(def SYM  (c/value! ctx "symbol"))
-(def OLDv (c/value-id ctx old-name))
-(def NEWv (c/value! ctx new-name))
-
-(defn symbol-leaf? [e]
-  (some #(= SYM (:r (c/claim-of ctx %))) (c/by-lp ctx e KIND)))
-
-(def target-modules (filter #(str/includes? % target-substr) (keys @file->ents)))
-(def target-ents (set (mapcat @file->ents target-modules)))
-
-;; --- INVARIANT (Turtle #5): a rename must not collide with an existing binding.
-;; "Well-formed datum" is the weak guarantee; "renamed symbol doesn't already name
-;; a binding in this module" is the one that makes this a refactoring engine, not a
-;; fancy round-trip. (Scope here is module-local — exact scoping awaits id-references.)
 (def DEFHEADS #{"def" "defn" "defn-" "def-" "defonce" "definline"})
-(defn field-child [e fname]                         ; entity that is e's fname child
+
+(defn ^String load-edn! [ctx tx file->ents ^String path]
+  (let [lines (fram.str/split-lines (fram.rt/slurp path))
+   src (let [header (first (filter (fn [l] (str/starts-with? l "@file")) lines))]
+  (if (some? header) (subs header 6) path))
+   local (atom (let [e {}]
+  e))
+   ent! (fn [lid] (let [existing (get (deref local) lid)]
+  (if (some? existing) (let [e existing]
+  e) (let [e (c/entity! ctx)]
+  (swap! local (fn [m] (assoc m lid e)))
+  (swap! file->ents (fn [m] (assoc m src (conj (get m src []) e))))
+  e))))]
+  (doseq [line lines
+   :when (str/starts-with? line "[")]
+  (let [triple (edn/read-string line)
+   tv (let [x triple]
+  x)
+   s (nth tv 0)
+   p (let [x (nth tv 1)]
+  x)
+   o (nth tv 2)
+   L (ent! s)
+   P (c/value! ctx p)
+   R (if (integer? o) (ent! o) (c/value! ctx o))]
+  (c/claim! ctx L P R tx)))
+  src))
+
+(defn field-child [ctx e ^String fname]
   (let [P (c/value-id ctx fname)]
-    (when P (let [cids (c/by-lp ctx e P)] (when (seq cids) (:r (c/claim-of ctx (first cids))))))))
-(defn sym-val [e]                                   ; if e is a symbol leaf, its name string
-  (when (and e (symbol-leaf? e))
-    (let [vc (filter #(= Vp (:p (c/claim-of ctx %))) (c/by-l ctx e))]
-      (when (seq vc) (c/literal ctx (:r (c/claim-of ctx (first vc))))))))
-(defn binding-name [e]                              ; if e is a (def|defn ...) list node, the bound name
-  (let [h (sym-val (field-child e "f0"))]
-    (when (and h (DEFHEADS h)) (sym-val (field-child e "f1")))))
-(defn module-bindings [src] (set (keep binding-name (@file->ents src))))
+  (if (some? P) (do
+  (let [cids (c/by-lp ctx e (let [p P]
+  p))]
+  (if (seq cids) (do
+  (let [cl (c/claim-of ctx (first cids))
+   r (:r cl)]
+  (if (integer? r) (do
+  (let [ri r]
+  ri)))))))))))
 
-(doseq [m target-modules]
-  (when (contains? (module-bindings m) new-name)
-    (binding [*out* *err*]
-      (println (str "REJECTED — `" new-name "` is already a binding in " m ".\n"
-                    "  A rename onto an existing binding would shadow/collide; the store refuses the write.\n"
-                    "  (Turtle #5 invariant: rename-doesn't-collide. No claims were mutated.)")))
-    (System/exit 3)))
+(defn ^Boolean symbol-leaf? [ctx KIND SYM e]
+  (boolean (some (fn [cid] (= SYM (let [cl (c/claim-of ctx cid)]
+  (let [r (:r cl)]
+  (if (integer? r) (let [ri r]
+  ri) -1))))) (c/by-lp ctx e KIND))))
 
-(def renamed (atom 0))
-(when OLDv
-  (doseq [cid (vec (c/by-pr ctx Vp OLDv))]          ; every [e v old] claim
-    (let [e (:l (c/claim-of ctx cid))]
-      (when (and (target-ents e) (symbol-leaf? e))
-        (let [ncid (c/claim! ctx e Vp NEWv tx)]     ; assert new value
-          (c/claim! ctx ncid SUP cid tx))           ; supersede the old value-claim
-        (swap! renamed inc)))))
+(defn sym-val [ctx Vp KIND SYM e]
+  (if (symbol-leaf? ctx KIND SYM e) (do
+  (let [vc (filterv (fn [cid] (let [cl (c/claim-of ctx cid)
+   p (:p cl)]
+  (= p Vp))) (c/by-l ctx e))]
+  (if (seq vc) (do
+  (let [cl (c/claim-of ctx (first vc))
+   r (:r cl)]
+  (c/literal ctx (if (integer? r) (let [ri r]
+  ri) 0)))))))))
 
-;; occurrences of `old` left untouched in OTHER files (proof of scope-correctness)
-(def preserved
-  (if OLDv
-    (count (filter (fn [cid] (let [e (:l (c/claim-of ctx cid))]
-                               (and (not (target-ents e)) (symbol-leaf? e))))
-                   (c/by-pr ctx Vp OLDv)))
-    0))
+(defn binding-name [ctx Vp KIND SYM e]
+  (let [h (sym-val ctx Vp KIND SYM (let [fc (field-child ctx e "f0")]
+  (if (some? fc) fc 0)))]
+  (if (and (some? h) (contains? DEFHEADS h)) (do
+  (let [f1 (field-child ctx e "f1")]
+  (if (some? f1) (do
+  (sym-val ctx Vp KIND SYM (let [e2 f1]
+  e2)))))))))
 
-;; --- re-project each file's source FROM the mutated store -------------------
-(defn extract-file! [src out-path]
-  (with-open [w (clojure.java.io/writer out-path)]
-    (binding [*out* w]
-      (println (str "@file " src))
-      (doseq [e (@file->ents src)
-              cid (c/by-l ctx e)]                    ; LIVE claims only (superseded excluded)
-        (let [cl (c/claim-of ctx cid) p (:p cl) r (:r cl) ps (c/literal ctx p)]
-          (when (not= ps "supersedes")
-            (if (c/value-object? ctx r)
-              (println (str "[" e " " (pr-str ps) " " (pr-str (c/literal ctx r)) "]"))
-              (println (str "[" e " " (pr-str ps) " " r "]")))))))))
+(defn module-bindings [ctx Vp KIND SYM ents]
+  (set (keep (fn [e] (binding-name ctx Vp KIND SYM e)) ents)))
 
-(def outs (into {} (for [src srcs]
-                     [src (str "/tmp/mutated-" (-> src (str/split #"/") last) ".edn")])))
-(doseq [src srcs] (extract-file! src (outs src)))
+(defn ^String project-file [ctx file->ents ^String src]
+  (let [lines (vec (cons (str "@file " src) (mapcat (fn [e] (keep (fn [cid] (let [cl (c/claim-of ctx cid)
+   p (:p cl)
+   r (:r cl)
+   ps (c/literal ctx (if (integer? p) (let [pi p]
+  pi) 0))]
+  (if (not= ps "supersedes") (do
+  (if (c/value-object? ctx (if (integer? r) (let [ri r]
+  ri) 0)) (str "[" e " " (fram.pr-str ps) " " (fram.pr-str (c/literal ctx (if (integer? r) (let [ri r]
+  ri) 0))) "]") (str "[" e " " (fram.pr-str ps) " " r "]")))))) (c/by-l ctx e))) (get (deref file->ents) src []))))]
+  (str (str/join "\n" lines) "\n")))
 
-(binding [*out* *err*]
-  (println "================ TURTLE #4 — graph-native rename ================")
-  (println (str "edit: rename symbol `" old-name "` -> `" new-name "` in files matching \"" target-substr "\""))
-  (println (str "renamed (target file): " @renamed " symbol occurrences"))
-  (println (str "preserved (other files, same name, untouched): " preserved " occurrences"))
-  (println (str "superseded claims (recoverable, nothing deleted): " @renamed))
-  (println (str "live claims in store: " (count (c/current-claims ctx))))
-  (doseq [src srcs] (println (str "projected -> " (outs src) "   <- " src))))
+(defn rename! [^String old-name ^String new-name ^String target-substr edn-paths]
+  (let [ctx (c/new-store)
+   tx (c/begin-tx! ctx "author")
+   SUP (c/value! ctx "supersedes")
+   _ (c/set-supersedes-pred! ctx SUP)
+   file->ents (atom (let [e {}]
+  e))
+   srcs (mapv (fn [p] (load-edn! ctx tx file->ents p)) edn-paths)
+   Vp (c/value! ctx "v")
+   KIND (c/value! ctx "kind")
+   SYM (c/value! ctx "symbol")
+   OLDv (c/value-id ctx old-name)
+   NEWv (c/value! ctx new-name)
+   target-mods (filterv (fn [s] (str/includes? s target-substr)) srcs)
+   target-ents (set (mapcat (fn [s] (get (deref file->ents) s [])) target-mods))]
+  (doseq [m target-mods]
+  (if (contains? (module-bindings ctx Vp KIND SYM (get (deref file->ents) m [])) new-name) (do
+  (fram.rt/println-err! (str "REJECTED — `" new-name "` is already a binding in " m "."))
+  (fram.rt/println-err! "  A rename onto an existing binding would shadow/collide; the store refuses the write.")
+  (fram.rt/println-err! "  (Turtle #5 invariant: rename-doesn't-collide. No claims were mutated.)")
+  (fram.rt/exit! 3))))
+  (let [renamed (atom 0)]
+  (if (some? OLDv) (do
+  (doseq [cid (vec (c/by-pr ctx Vp (let [v OLDv]
+  v)))]
+  (let [cl (c/claim-of ctx cid)
+   e (:l cl)
+   ei (if (integer? e) (let [ei2 e]
+  ei2) 0)]
+  (if (and (contains? target-ents ei) (symbol-leaf? ctx KIND SYM ei)) (do
+  (let [ncid (c/claim! ctx ei Vp NEWv tx)]
+  (c/claim! ctx ncid SUP cid tx))
+  (swap! renamed (fn [x] (+ x 1)))))))))
+  (let [preserved (if (some? OLDv) (count (filterv (fn [cid] (let [cl (c/claim-of ctx cid)
+   e (:l cl)
+   ei (if (integer? e) (let [ei2 e]
+  ei2) 0)]
+  (and (not (contains? target-ents ei)) (symbol-leaf? ctx KIND SYM ei)))) (vec (c/by-pr ctx Vp (let [v OLDv]
+  v))))) 0)
+   outs (into {} (mapv (fn [src] [src (str "/tmp/mutated-" (-> src (str/split #"/") last) ".edn")]) srcs))]
+  (doseq [src srcs]
+  (let [out-path (get outs src "")]
+  (fram.rt/spit-file out-path (project-file ctx file->ents src))))
+  {:renamed (deref renamed) :preserved preserved :old old-name :new new-name :target target-substr :srcs srcs :outs outs :live-claims (count (c/current-claims ctx))}))))

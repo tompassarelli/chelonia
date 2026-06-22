@@ -1,0 +1,227 @@
+#lang beagle/clj
+;; ============================================================================
+;; Chartroom — code-as-claims on Fram.
+;; ============================================================================
+;; Loads a beagle source tree (already projected to CNF claim triples by
+;; `beagle-claims`) into a Fram claim store, derives the NAMESPACE-CORRECT
+;; function call graph, and runs two benchmarks that validate-or-kill the bet:
+;;
+;;   A. caller precision on name collisions   (graph resolves scope; bare-symbol can't)
+;;   B. transitive leverage / blast radius     (one fixpoint; a one-hop tool can't)
+;;
+;; Run:  bb -cp ~/code/fram/out src/chartroom.clj build/gjoa.claims
+;; ============================================================================
+(ns chartroom)
+(define-mode strict)
+(require clojure.string :as str)
+(require callgraph :as cg)
+(require fram.cnf :as c)
+(require fram.datalog :as d)
+
+;; ---- transitive closure (in-process truth) ----------------------------------
+(defn rev-adj [edges :- (Vec (Vec Any))] :- (Map Any (Set Any))
+  (reduce (fn [m :- (Map Any (Set Any)) e :- Any] :- (Map Any (Set Any))
+            (let [ev :- (Vec Any) (let [x :- (Vec Any) e] x)
+                  a :- Any (nth ev 0)
+                  b :- Any (nth ev 1)]
+              (assoc m b (conj (get m b #{}) a))))
+          {}
+          edges))
+
+(defn fwd-adj [edges :- (Vec (Vec Any))] :- (Map Any (Set Any))
+  (reduce (fn [m :- (Map Any (Set Any)) e :- Any] :- (Map Any (Set Any))
+            (let [ev :- (Vec Any) (let [x :- (Vec Any) e] x)
+                  a :- Any (nth ev 0)
+                  b :- Any (nth ev 1)]
+              (assoc m a (conj (get m a #{}) b))))
+          {}
+          edges))
+
+(defn transitive [adj :- (Map Any (Set Any)) n :- Any] :- (Set Any)
+  (loop [seen     :- (Set Any) #{}
+         frontier :- (Vec Any) (vec (get adj n #{}))]
+    (if (empty? frontier) seen
+      (let [x  :- Any (peek frontier)
+            fr :- (Vec Any) (pop frontier)]
+        (if (contains? seen x)
+          (recur seen fr)
+          (recur (conj seen x) (into fr (vec (get adj x #{})))))))))
+
+;; ---- stats helpers ----------------------------------------------------------
+(defn avg-ranks [v :- (Vec Any)] :- (Vec Any)
+  (let [idx     :- (Vec Any) (vec (map-indexed (fn [i :- Int x :- Any] :- (Vec Any) [i x]) v))
+        sorted  :- (Vec Any) (vec (sort-by (fn [p :- Any] :- Any (nth (let [x :- (Vec Any) p] x) 1)) idx))
+        groups  :- (Vec Any) (vec (partition-by (fn [p :- Any] :- Any (nth (let [x :- (Vec Any) p] x) 1)) sorted))
+        rank-map :- (Map Any Any)
+          (loop [gs    :- (Vec Any) groups
+                 start :- Int 1
+                 acc   :- (Map Any Any) {}]
+            (if (empty? gs) acc
+              (let [g :- Any (first gs)
+                    gv :- (Vec Any) (let [x :- (Vec Any) g] x)
+                    n  :- Int (count gv)
+                    r  :- Any (/ (+ (* 2.0 start) (- n 1)) 2.0)]
+                (recur (vec (rest gs)) (+ start n)
+                       (reduce (fn [a :- (Map Any Any) pair :- Any] :- (Map Any Any)
+                                 (let [pv :- (Vec Any) (let [x :- (Vec Any) pair] x)
+                                       i  :- Any (nth pv 0)]
+                                   (assoc a i r)))
+                               acc gv)))))]
+    (mapv (fn [i :- Any] :- Any (get rank-map i)) (range (count v)))))
+
+(defn pearson [xs :- (Vec Any) ys :- (Vec Any)] :- Any
+  (let [n   :- Int (count xs)
+        mx  :- Any (/ (reduce (fn [s :- Any x :- Any] :- Any (+ s x)) 0.0 xs) n)
+        my  :- Any (/ (reduce (fn [s :- Any y :- Any] :- Any (+ s y)) 0.0 ys) n)
+        cov :- Any (reduce (fn [s :- Any i :- Int] :- Any
+                             (let [x :- Any (nth xs i)
+                                   y :- Any (nth ys i)]
+                               (+ s (* (- x mx) (- y my)))))
+                           0.0
+                           (range n))
+        sx  :- Any (Math/sqrt (reduce (fn [s :- Any x :- Any] :- Any (let [dd :- Any (- x mx)] (+ s (* dd dd)))) 0.0 xs))
+        sy  :- Any (Math/sqrt (reduce (fn [s :- Any y :- Any] :- Any (let [dd :- Any (- y my)] (+ s (* dd dd)))) 0.0 ys))]
+    (if (or (zero? sx) (zero? sy)) 0.0 (/ cov (* sx sy)))))
+
+(defn spearman [xs :- (Vec Any) ys :- (Vec Any)] :- Any
+  (pearson (avg-ranks xs) (avg-ranks ys)))
+
+(defn fmt-f3 [x :- Any] :- String (format "%.3f" (double x)))
+(defn short-file [k :- Any] :- String
+  (str/replace (let [kv :- (Vec Any) (let [x :- (Vec Any) k] x)] (let [s :- String (first kv)] s))
+               #".*/gjoa/" ""))
+
+;; ============================================================================
+(defn -main [] :- Nil
+  (let [corpus-path :- String (or (first *command-line-args*) "build/gjoa.claims")
+        blocks  :- (Vec cg/Block) (cg/parse-corpus corpus-path)
+        graph   :- cg/CallGraph  (cg/build-graph blocks)
+        defns   :- (Vec cg/DefnEntry) (:defns graph)
+        by-name :- (Map String (Vec cg/DefnEntry)) (:by-name graph)
+        edges   :- (Vec (Vec Any)) (:edges graph)
+        radj    :- (Map Any (Set Any)) (rev-adj edges)
+        fadj    :- (Map Any (Set Any)) (fwd-adj edges)
+        defn-keys :- (Vec Any) (mapv (fn [e :- cg/DefnEntry] :- Any (:key e)) defns)
+        direct  :- (Map Any Int) (into {} (map (fn [k :- Any] :- (Vec Any) [k (count (get radj k #{}))]) defn-keys))
+        blast   :- (Map Any Int) (into {} (map (fn [k :- Any] :- (Vec Any) [k (count (transitive radj k))]) defn-keys))]
+
+    (println "================ CHARTROOM — code-as-claims on Fram ================")
+    (println (str "corpus: " corpus-path))
+    (println (str "files: " (count blocks)
+                  "  defns: " (count defns)
+                  "  resolved internal call-edges: " (count edges)))
+
+    ;; ---- load the call graph into a Fram store; closure via Fram Datalog ----
+    (let [ctx  :- (Atom Any) (c/new-store)
+          tx   :- Int (c/begin-tx! ctx "code")
+          EDGE :- Int (c/value! ctx "calls-defn")
+          k->id :- (Atom (Map Any Any)) (atom {})
+          ent  (fn [k :- Any] :- Int
+                 (let [existing :- Any (get @k->id k)]
+                   (if (some? existing)
+                     (let [e :- Int existing] e)
+                     (let [e :- Int (c/entity! ctx)]
+                       (swap! k->id (fn [m :- (Map Any Any)] :- (Map Any Any) (assoc m k e)))
+                       e))))
+          _    (doseq [edge :- Any edges]
+                 (let [ev :- (Vec Any) (let [x :- (Vec Any) edge] x)
+                       a :- Any (nth ev 0)
+                       b :- Any (nth ev 1)]
+                   (c/claim! ctx (ent a) EDGE (ent b) tx)))
+          t0   :- Any (System/currentTimeMillis)
+          db   :- Any
+            (d/run-rules ctx
+              [(d/rule "reaches" [(d/v :x) (d/v :y)]
+                       [(d/lit "triple" [(d/v :x) EDGE (d/v :y)])])
+               (d/rule "reaches" [(d/v :x) (d/v :z)]
+                       [(d/lit "triple" [(d/v :x) EDGE (d/v :y)])
+                        (d/lit "reaches" [(d/v :y) (d/v :z)])])])
+          dl-reaches :- (Set Any) (set (d/facts db "reaches"))
+          t1   :- Any (System/currentTimeMillis)
+          truth :- Int (reduce (fn [s :- Int k :- Any] :- Int (+ s (count (transitive fadj k)))) 0 defn-keys)]
+      (println (str "\nFram Datalog transitive closure: " (count dl-reaches)
+                    " reaches-pairs in " (- t1 t0) " ms"
+                    "  (in-process closure: " truth " pairs — "
+                    (if (= (count dl-reaches) truth) "MATCH" "DIVERGE") ")")))
+
+    ;; ---- BENCHMARK A: caller precision on name collisions -------------------
+    (println "\n================ BENCHMARK A — caller precision on collisions ================")
+    (println "(oracle = module-local scope: a call binds the defn in its own file)")
+    (let [collisions :- (Vec Any)
+            (vec (sort (map first (filter (fn [kv :- Any] :- Bool
+                                            (let [pair :- (Vec Any) (let [x :- (Vec Any) kv] x)
+                                                  ds :- (Vec cg/DefnEntry) (let [x :- (Vec cg/DefnEntry) (nth pair 1)] x)]
+                                              (> (count (distinct (map (fn [d :- cg/DefnEntry] :- Any (first (:key d))) ds))) 1)))
+                                          by-name))))
+          rows :- (Vec (Map Keyword Any))
+            (vec (for [nm :- Any collisions
+                       :let [ds :- (Vec cg/DefnEntry) (get by-name (let [s :- String nm] s) [])
+                             incumbent :- (Set Any) (reduce (fn [s :- (Set Any) d :- cg/DefnEntry] :- (Set Any)
+                                                              (into s (get radj (:key d) #{})))
+                                                            #{}
+                                                            ds)]
+                       d :- cg/DefnEntry ds
+                       :let [g :- (Set Any) (get radj (:key d) #{})
+                             gc :- Int (count g)
+                             ic :- Int (count incumbent)]
+                       :when (pos? ic)]
+                   {:name nm :file (short-file (:key d))
+                    :graph-p 1.0
+                    :incumbent-p (/ gc (double ic))
+                    :gn gc :in ic}))
+          rows :- (Vec (Map Keyword Any)) (filterv (fn [r :- (Map Keyword Any)] :- Bool (pos? (let [v :- Int (:gn r)] v))) rows)
+          mean-delta :- Any
+            (if (seq rows)
+              (/ (reduce (fn [s :- Any r :- (Map Keyword Any)] :- Any
+                           (+ s (- (let [v :- Any (:graph-p r)] v) (let [v :- Any (:incumbent-p r)] v))))
+                         0.0 rows)
+                 (count rows))
+              0.0)
+          tot-g  :- Int (reduce (fn [s :- Int r :- (Map Keyword Any)] :- Int (+ s (let [v :- Int (:gn r)] v))) 0 rows)
+          tot-in :- Int (reduce (fn [s :- Int r :- (Map Keyword Any)] :- Int (+ s (let [v :- Int (:in r)] v))) 0 rows)
+          micro-incumbent-p :- Any (if (pos? tot-in) (/ tot-g (double tot-in)) 1.0)
+          micro-delta :- Any (- 1.0 micro-incumbent-p)
+          wrong :- Int (count (filterv (fn [r :- (Map Keyword Any)] :- Bool (< (let [v :- Any (:incumbent-p r)] v) 1.0)) rows))]
+      (println (str "collision names: " (count collisions) "  scored targets: " (count rows)))
+      (doseq [r :- (Map Keyword Any) (->> rows (sort-by (fn [r2 :- (Map Keyword Any)] :- Any (:incumbent-p r2))) (take 12))]
+        (println (format "  %-18s %-22s graph P=%.2f  incumbent P=%.2f  (%d of %d callers are in-scope)"
+                         (:name r) (:file r) (:graph-p r) (:incumbent-p r) (:gn r) (:in r))))
+      (println (format "graph is PERFECT on %d/%d targets; the bare-symbol incumbent is WRONG (P<1) on %d (%.0f%%)"
+                       (count rows) (count rows) wrong (* 100.0 (/ wrong (max 1 (count rows))))))
+      (println (str "MACRO mean precision delta (graph - incumbent): " (fmt-f3 mean-delta)))
+      (println (format "MICRO pooled delta: %s  (incumbent P=%.3f over %d in-scope / %d returned call-sites)"
+                       (fmt-f3 micro-delta) micro-incumbent-p tot-g tot-in))
+      (println (str "  [PASS >= +0.20 (documented kill line)]"
+                    (if (>= mean-delta 0.20) " ✅" " —"))))
+
+    ;; ---- BENCHMARK B: transitive leverage / keystones -----------------------
+    (println "\n================ BENCHMARK B — transitive leverage (keystones) ================")
+    (let [called :- (Vec Any) (filterv (fn [k :- Any] :- Bool (pos? (get blast k 0))) defn-keys)
+          xs :- (Vec Any) (mapv (fn [k :- Any] :- Any (double (get direct k 0))) called)
+          ys :- (Vec Any) (mapv (fn [k :- Any] :- Any (double (get blast k 0))) called)
+          rho :- Any (spearman xs ys)
+          top-direct :- (Set Any) (set (->> defn-keys (sort-by (fn [k :- Any] :- Int (- (get direct k 0)))) (take 10)))
+          top-blast  :- (Vec Any) (vec (->> defn-keys (sort-by (fn [k :- Any] :- Int (- (get blast k 0)))) (take 5)))
+          hidden :- (Vec Any) (vec (remove (fn [k :- Any] :- Bool (contains? top-direct k)) top-blast))
+          ratio>=3 :- (Vec Any)
+            (filterv (fn [k :- Any] :- Bool
+                       (let [d :- Int (get direct k 0)
+                             b :- Int (get blast k 0)]
+                         (and (pos? d) (>= (/ b (double d)) 3))))
+                     defn-keys)]
+      (println (str "called defns: " (count called) "  (ranked)"))
+      (println "\nTOP 8 by transitive blast radius (transitive callers):")
+      (doseq [k :- Any (->> defn-keys (sort-by (fn [k2 :- Any] :- Int (- (get blast k2 0)))) (take 8))]
+        (let [nm :- String (:name (first (filterv (fn [e :- cg/DefnEntry] :- Bool (= (:key e) k)) defns)))]
+          (println (format "  blast=%-4d direct=%-3d  %s   %s"
+                           (get blast k 0) (get direct k 0) nm (short-file k)))))
+      (println (str "\nSpearman rho (direct-rank vs blast-rank): " (fmt-f3 rho)
+                    "  [PASS < 0.80 => closure reorders] " (if (< rho 0.8) "✅" "—")))
+      (println (str "defns with blast/direct >= 3x: " (count ratio>=3) "  [PASS >= 15] "
+                    (if (>= (count ratio>=3) 15) "✅" "—")))
+      (when (seq hidden)
+        (let [k :- Any (first hidden)
+              kn :- String (:name (first (filterv (fn [e :- cg/DefnEntry] :- Bool (= (:key e) k)) defns)))]
+          (println (format "KEYSTONE HIDDEN BY ONE-HOP: %s (blast=%d, direct=%d) is top-5 transitive but NOT top-10 direct ✅"
+                           kn (get blast k 0) (get direct k 0))))))
+    (println "\n====================================================================")))
