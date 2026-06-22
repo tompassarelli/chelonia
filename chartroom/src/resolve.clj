@@ -882,7 +882,14 @@
   (cond
     (nil? d)        (let [e (register! src (c/entity! ctx))] (c/claim! ctx e KIND (c/value! ctx "nil") tx) e)
     (symbol? d)     (mint-leaf! src "symbol"  (str d))
-    (keyword? d)    (mint-leaf! src "keyword" (subs (str d) 1))
+    ;; A `:foo` token is a SYMBOL leaf with the colon RETAINED — beagle reads .bclj via
+    ;; Racket's reader, which has no keyword syntax: `:enable`/`:-` come back as the symbol
+    ;; |:enable|/|:-| (kind="symbol", v=":enable"). claims-roundtrip's emit/decode shares
+    ;; that convention, so a `keyword`-kind leaf (colon stripped) decodes to a Clojure keyword
+    ;; that renders as `#:-` — corrupting the `:-` type marker and rejecting the build. The
+    ;; authoring spec is parsed by clojure.edn (where `:-` IS a keyword), so we MUST re-encode
+    ;; it the beagle way here, or graph-authored typed defs never round-trip to text.
+    (keyword? d)    (mint-leaf! src "symbol"  (str d))
     (string? d)     (mint-leaf! src "string"  d)
     (boolean? d)    (mint-leaf! src "bool"    (if d "true" "false"))
     (char? d)       (mint-leaf! src "char"    (str d))
