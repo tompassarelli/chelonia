@@ -201,7 +201,7 @@
 (defn emit-attention!
   "Write one attention event as a decaying (last-write-wins) claim set into the
    daemon. Subject = @attention:<uuid>. Supersedes the agent's previous node."
-  [port {:keys [agent node ts tool]}]
+  [port {:keys [agent node ts tool file]}]
   (let [subj (str "@attention:" agent)
         prev (get @last-attended agent)]
     ;; retire the previous attending edge so only the current node is lit.
@@ -210,6 +210,9 @@
     (assert-claim! port subj "attending" node)
     (assert-claim! port subj "attending_at" ts)
     (when tool (assert-claim! port subj "attending_tool" tool))
+    ;; raw source path for framescope's beam tooltip (§9). Attr, not edge —
+    ;; the @<mod> `attending` target is authoritative; this is the unmapped path.
+    (when file (assert-claim! port subj "attending_file" file))
     (swap! last-attended assoc agent {:node node :ts ts :tool tool})))
 
 ;; ---- follow (tail -f every stream) ----------------------------------------

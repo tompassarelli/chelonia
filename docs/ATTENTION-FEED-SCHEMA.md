@@ -50,6 +50,7 @@ agent's "cursor"). Predicates:
 | `attending` | **edge** | the code-graph node the agent is touching NOW. Object is a module id `@<mod>` (matches a `#root` module node from the code graph) or a synthetic `@<basename>` for an unmapped file. **Single-valued** by intent — exactly one live `attending` edge per agent. |
 | `attending_at` | attr | ISO-8601 timestamp of the touch (`2026-06-22T10:34:07.983Z`), or a fallback (stream mtime) when the event carried none. |
 | `attending_tool` | attr | the tool that produced the touch: `Read` `Edit` `Write` `MultiEdit` `NotebookEdit` `Grep`. Lets the overlay distinguish a *read* glance from a *write* focus. |
+| `attending_file` | attr | the raw source path that produced the touch (`src/fram/schema.bclj`). Tooltip detail only — the `attending` target node is the authoritative location; this is the unmapped path for hover. Optional on the wire: omitted when no path was extracted, so fall back to the target node label. |
 
 **Edge vs attr rule (you already have it):** an object that is an `@`-prefixed,
 whitespace-free id is an EDGE; everything else is a literal attr. Holds verbatim:
@@ -140,8 +141,9 @@ for "is this agent still here".
    `attending` edge whose `attending_at` is older than the TTL (≈30s) so an idle
    agent doesn't stay lit forever. (When the sweep ships, the edge will also
    actually disappear from `/graph`.)
-5. **Hover.** Show `attending_tool` + `attending_at` + the file (if you also carry
-   it — see note) in the tooltip.
+5. **Hover.** Show `attending_tool` + `attending_at` + `attending_file` (the raw
+   path, now carried as a 4th attr) in the tooltip. Fall back to the target node
+   label when `attending_file` is absent.
 
 The agent node already exists in the federated fleet graph as `@agent:<uuid>`;
 `@attention:<uuid>` is a SEPARATE cursor node. If you'd rather hang the edge off
@@ -159,6 +161,7 @@ bridge uses (`{:op :assert :te … :p … :r … :base <version>}`, OCC-retried)
 @attention:13b34cc5653c  attending       @bridge
 @attention:13b34cc5653c  attending_at     "2026-06-22T10:39:38.740Z"
 @attention:13b34cc5653c  attending_tool   "Edit"
+@attention:13b34cc5653c  attending_file   "web/bridge.js"
 ```
 
 When that agent then opens `web/graph.js`, the extractor retracts the old edge and
@@ -169,6 +172,7 @@ asserts the new one (last-write-wins) — the cursor moves `@bridge → @graph`:
 @attention:13b34cc5653c  attending       @graph
 @attention:13b34cc5653c  attending_at     "2026-06-22T10:41:02.119Z"
 @attention:13b34cc5653c  attending_tool   "Read"
+@attention:13b34cc5653c  attending_file   "web/graph.js"
 ```
 
 A second agent attending the real `schema` module (authoritative file→module
@@ -178,6 +182,7 @@ match, not a basename fallback):
 @attention:29f60f7680b2  attending       @schema
 @attention:29f60f7680b2  attending_at     "2026-06-22T10:42:15.300Z"
 @attention:29f60f7680b2  attending_tool   "Edit"
+@attention:29f60f7680b2  attending_file   "src/fram/schema.bclj"
 ```
 
 ## 8. Example /live JSON frames (what your WS receives)
@@ -187,6 +192,7 @@ These are the existing `live-ws` frames — UNCHANGED shape, just new preds:
 ```json
 {"type":"commit","op":"assert","l":"@attention:13b34cc5653c","p":"attending","r":"@graph","version":5012,"ref":true}
 {"type":"commit","op":"assert","l":"@attention:13b34cc5653c","p":"attending_tool","r":"Read","version":5013,"ref":false}
+{"type":"commit","op":"assert","l":"@attention:13b34cc5653c","p":"attending_file","r":"web/graph.js","version":5014,"ref":false}
 {"type":"commit","op":"retract","l":"@attention:13b34cc5653c","p":"attending","r":"@bridge","version":5011,"ref":true}
 ```
 
@@ -195,20 +201,24 @@ These are the existing `live-ws` frames — UNCHANGED shape, just new preds:
 
 ---
 
-## 9. Open coordination question (for @framescope)
+## 9. Coordination questions — RESOLVED 2026-06-22 (@framescope ↔ @fram-engine)
 
-- **Cursor node vs agent node.** v1 mints a SEPARATE `@attention:<uuid>` node so
-  attention churn never mutates the `@agent:<uuid>` fleet node. If the overlay
-  would rather light the agent node directly (so the existing agent→module
-  `working_on` line and the attention edge coincide), the extractor can use
-  `@agent:<uuid>` as the subject instead — one-line change. Your call drives it:
-  do you want a dedicated cursor node, or the edge on the agent node?
-- **Do you want the raw `file` on the wire** (as a 4th attr `attending_file`) for
-  the tooltip, or is the `attending` target node enough? v1 omits it to keep the
-  decay write to 2-3 ops; trivial to add.
+- **Cursor node vs agent node — RESOLVED: keep v1.** Stay with the dedicated
+  `@attention:<uuid>` cursor node so attention churn never mutates the
+  `@agent:<uuid>` fleet node; the overlay maps cursor↔agent by the shared uuid
+  suffix for isolate-on-click. No extractor change.
+- **Raw `file` on the wire — RESOLVED: shipped.** `attending_file` now lands as a
+  4th attr (one extra `:assert` per touch in `emit-attention!`), carrying the raw
+  source path for the beam tooltip. Optional — omitted when no path was
+  extracted; fall back to the target node label.
 
-Ping @fram-engine for: a richer file→module map (today only modules with a
-committed `#root file` claim resolve authoritatively — everything else uses the
-`basename-without-extension` fallback, e.g. `web/graph.js → @graph`), or the
-server-side TTL sweeper if you want stale edges to actually vanish from `/graph`
-rather than just fade client-side.
+Still open / on request to @fram-engine (low priority):
+
+- **Richer file→module map.** Today only modules with a committed `#root file`
+  claim resolve authoritatively; everything else uses the
+  `basename-without-extension` fallback (`web/graph.js → @graph`). More files
+  landing on real `#root` modules makes beams hit the actual program graph — but
+  the fallback renders fine, so this is deferred (it's a code-daemon ingest
+  concern, not an extractor change).
+- **Server-side TTL sweeper.** If you want stale `attending` edges to actually
+  vanish from `/graph` rather than just fade client-side (§5).
