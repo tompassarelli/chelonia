@@ -1,0 +1,8 @@
+## JVM BOOT BENCH — N=10000000 cadence-K=10000 writers=8 root=/dev/shm/jvm-snapboot-10000000
+generated 10000000 claims; building B store...
+  build: 51928 ms
+  snapshot(@T): fold+serialize 26241 ms -> 10000 rows, 68.62 MB image
+  image 68.62 MB  vs  full log 957.56 MB  (14x smaller)
+
+-- BOOT (warm cache; daemon-restart steady state) --
+  full-replay (refold all)     best  99534.1 ms   median  99571.9 ms

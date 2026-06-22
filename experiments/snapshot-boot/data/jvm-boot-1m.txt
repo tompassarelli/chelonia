@@ -1,0 +1,19 @@
+## JVM BOOT BENCH — N=1000000 cadence-K=10000 writers=8 root=/dev/shm/jvm-snapboot-1000000
+generated 1000000 claims; building B store...
+  build: 5343 ms
+  snapshot(@T): fold+serialize 2211 ms -> 10000 rows, 6.62 MB image
+  image 6.62 MB  vs  full log 94.75 MB  (14x smaller)
+
+-- BOOT (warm cache; daemon-restart steady state) --
+  full-replay (refold all)     best   9462.0 ms   median   9768.2 ms
+  image-boot (mmap+tail)       best    398.5 ms   median    416.8 ms
+  MATCH = true
+
+-- IMAGE-BOOT breakdown --
+  raw mmap page-in (I/O)  :     35.3 ms   (6.62 MB resident; the true I/O term)
+  hydrate decode          :     77.4 ms   (10000 keys; compiled buffer walk)
+  tail read (id > T)      :    229.5 ms   (10000 tail claims)
+  tail fold-into state    :     19.5 ms
+  TOTAL image-boot        :    326.5 ms
+
+RESULT N=1000000 K=10000 full_best=9462.0 image_best=398.5 image_median=416.8 snap_mb=6.617 log_mb=94.75 speedup=23.7

@@ -1,0 +1,4 @@
+RESULT N=1000000 K=1000 full_best=9814.6 image_best=182.3 image_median=195.1 snap_mb=6.679 log_mb=94.75 speedup=53.8
+RESULT N=1000000 K=5000 full_best=9795.1 image_best=249.6 image_median=279.9 snap_mb=6.651 log_mb=94.75 speedup=39.2
+RESULT N=1000000 K=20000 full_best=9633.9 image_best=938.3 image_median=967.3 snap_mb=6.549 log_mb=94.75 speedup=10.3
+RESULT N=1000000 K=50000 full_best=10278.2 image_best=4082.9 image_median=4183.7 snap_mb=6.354 log_mb=94.75 speedup=2.5

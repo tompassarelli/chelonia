@@ -1,0 +1,8 @@
+## IMAGE-BOOT ONLY — dir=/dev/shm/jvm-snapboot-10000000 snap=/dev/shm/jvm-snapboot-10000000/snapshots/snap-019eefa3eacc-007-012ebbf.fbin
+  image-boot best 1183.4 ms  median 1244.8 ms
+  raw mmap page-in (I/O)  :    138.9 ms   (68.62 MB)
+  hydrate decode          :    967.3 ms   (10000 keys)
+  tail read (id > T)      :    163.6 ms   (10000 tail claims)
+  tail fold-into state    :     41.4 ms
+
+RESULT N=10000000 K=10000 full_best=99534.1 image_best=1183.4 image_median=1244.8 snap_mb=68.619 speedup=84.1

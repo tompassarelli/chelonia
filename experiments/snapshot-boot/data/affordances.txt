@@ -1,0 +1,21 @@
+=== affordance demos — each is fold() re-pointed ===
+
+1. TIME-TRAVEL  (@e0 title over its 3 edits)
+   T=after edit 1 -> draft
+   T=after edit 2 -> reviewed
+   T=after edit 3 -> shipped
+   T=HEAD         -> shipped
+
+2. UNWIND / REDO  (cursor over the log; no undo-stack needed)
+   start  @cursor 4 -> title shipped
+   unwind @cursor 3 -> title shipped
+   unwind @cursor 2 -> title reviewed
+   redo   @cursor 3 -> title shipped
+
+3. FORK  (snapshot @T2, diverge two ways — shared image, different tails)
+   shared image title : reviewed
+   fork A title       : branch-A-final
+   fork B title       : branch-B-final
+   (both reuse the ONE snapshot image; only the tail differs)
+
+all affordances = the same pure fold, re-pointed. No bespoke undo/branch machinery.

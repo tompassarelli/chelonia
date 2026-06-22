@@ -1,0 +1,22 @@
+## BOOT BENCH — N=100000 cadence-K=10000 writers=8 root=/dev/shm/snapboot-100000
+generated 100000 claims; building B store...
+  build: 1714 ms
+  snapshot(@T): fold+serialize 979 ms -> 10000 rows, 0.78 MB image
+  image 0.78 MB  vs  full log 9.37 MB  (12x smaller)
+
+-- BOOT (warm cache; daemon-restart steady state) --
+  full-replay (refold all)   best   2203.9 ms   median   2221.3 ms
+  image-boot (mmap+tail)     best   2788.3 ms   median   2833.1 ms
+  state-keys full = 10000  image = 10000  MATCH = true
+
+-- IMAGE-BOOT breakdown --
+  hydrate (mmap image)   :   2317.8 ms   (10000 keys paged in)
+  tail read (id > T)     :    424.8 ms   (10000 tail claims)
+  tail fold-into state   :     44.3 ms
+  TOTAL image-boot       :   2786.8 ms
+
+-- COLD BOUND (image is the only cold I/O) --
+  image 0.78 MB => cold page-in ~ image-MB / disk-BW (e.g. @1GB/s = 0.8 ms)
+  full-replay cold must read full log 9.37 MB AND parse 100000 EDN records
+
+RESULT N=100000 K=10000 full_best=2203.9 image_best=2788.3 image_median=2833.1 snap_mb=0.777 log_mb=9.37 speedup=0.8
