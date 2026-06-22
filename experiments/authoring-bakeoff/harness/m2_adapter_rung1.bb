@@ -34,7 +34,10 @@
           :else (recur (conj acc form)))))))
 
 ;; an id token in a changeset may be a bare int (5), an int-string ("5"), or "@m#N".
-;; normalize: ints/int-strings -> the long; "@..." stays a string (a fresh model id).
+;; normalize: ints/int-strings -> the long; "@..." stays a string. The "@..."-string is
+;; NOT yet decided fresh-vs-existing here — that needs the current dump (an "@m#8" that
+;; names an EXISTING node 8 addresses it; one whose number is unused is a fresh mint).
+;; That decision lives in render-engine-dump/resolve, which has the dump in scope.
 (defn- norm-id [x]
   (cond
     (integer? x) x
@@ -42,6 +45,17 @@
     (and (string? x) (str/starts-with? x "@")) x
     (symbol? x) (str x)
     :else x))
+
+;; the trailing integer of an "@id" spelling, if any: "@m#8" -> 8, "@8" -> 8, "@mN" -> nil.
+;; The M2 prompt spells EVERY node "@m#<N>" (its worked example + the E6 rename), so the
+;; model addresses an existing engine node N as "@m#N". This extracts that N so resolution
+;; can map it back to the integer node when N exists in the current state. (Without this,
+;; every "@id" was minted FRESH — the binding-leaf respell never reached node N and the
+;; rename silently no-op'd: the false REFERENCE_ERROR this fix kills.)
+(defn- id-int-suffix [x]
+  (when (and (string? x) (str/starts-with? x "@"))
+    (when-let [m (re-find #"(\d+)$" x)]
+      (parse-long (second m)))))
 
 (defn- classify-tuple [form]
   (cond
@@ -103,19 +117,33 @@
         ;; current max integer id (existing nodes are ints)
         cur-max (reduce (fn [mx id] (max mx (if (int? id) id 0))) 0 (keys cur-props))
         all-tuples (concat (:asserts changeset) (:retracts changeset))
-        ;; fresh model ids: any "@..."-string id in the changeset gets a new int above max
-        fresh-model-ids (->> all-tuples
-                             (mapcat (fn [[s _ o]] [s (when (and (string? o) (str/starts-with? o "@")) o)]))
-                             (remove nil?)
-                             (filter #(and (string? %) (str/starts-with? % "@")))
+        existing-id? (fn [n] (contains? cur-props n))
+        ;; every "@..."-string id mentioned (subject or @-valued object)
+        all-at-ids (->> all-tuples
+                        (mapcat (fn [[s _ o]] [s (when (and (string? o) (str/starts-with? o "@")) o)]))
+                        (remove nil?)
+                        (filter #(and (string? %) (str/starts-with? % "@")))
+                        distinct)
+        ;; an "@m#N" whose N names an EXISTING node addresses that node (the prompt spells
+        ;; EVERY node "@m#N", incl. existing ones it asks the model to edit). Only an "@id"
+        ;; whose number is NOT an existing node is a genuine fresh mint (1B net-new subtree).
+        fresh-model-ids (->> all-at-ids
+                             (remove (fn [aid]
+                                       (when-let [n (id-int-suffix aid)] (existing-id? n))))
                              distinct)
         next-id (atom cur-max)
         model->eng (reduce (fn [m mid] (assoc m mid (swap! next-id inc))) {} fresh-model-ids)
         resolve (fn [x]
                   (cond
                     (and (string? x) (str/starts-with? x "@"))
-                    (or (model->eng x)
-                        (throw (ex-info (str "REFERENCE_ERROR: @id not in current state or changeset: " x) {})))
+                    (let [n (id-int-suffix x)]
+                      (cond
+                        ;; existing node addressed by its "@m#N" spelling -> the integer node
+                        (and n (existing-id? n)) n
+                        ;; genuinely fresh "@id" -> its minted integer
+                        (model->eng x) (model->eng x)
+                        :else
+                        (throw (ex-info (str "REFERENCE_ERROR: @id not in current state or changeset: " x) {}))))
                     (int? x) x
                     (and (string? x) (re-matches #"\d+" x)) (parse-long x)
                     :else x))]
