@@ -2,7 +2,13 @@
   (:require [fram.kernel :as k]
             [fram.fold :as fold]
             [clojure.string :as str]
+            [clojure.edn :as edn]
             [fram.rt :as rt]))
+
+(defn- split-kv [^String line]
+  (let [t (str/trim line)
+   m (re-find #"^(\S+)\s+(.*)$" t)]
+  (if (some? m) [(str (nth m 1)) (str (nth m 2))] [t ""])))
 
 (defrecord Doc [head body])
 
@@ -11,7 +17,7 @@
 (defn doc-body [r] (:body r))
 
 (defn- ^Doc split-doc [^String content]
-  (let [lines (fram.rt/split-on content "\n")
+  (let [lines (vec (str/split content #"\n" -1))
    n (count lines)]
   (loop [i 0]
   (cond
@@ -22,15 +28,16 @@
 (defn- ^String parse-obj [^String tok]
   (cond
   (str/starts-with? tok "@") tok
-  (str/starts-with? tok "\"") (fram.rt/edn-unquote tok)
+  (str/starts-with? tok "\"") (str (edn/read-string tok))
   :else tok))
 
 (defn- warn [^String msg]
-  (binding [*out* *err*] (println (str "WARN import: " msg))))
+  (binding [*out* *err*]
+  (println (str "WARN import: " msg))))
 
 (defn- file->claims [^String path ^String content]
   (let [doc (split-doc content)
-   lines (fram.rt/split-on (:head doc) "\n")
+   lines (vec (str/split (:head doc) #"\n" -1))
    n (count lines)
    si (loop [i 0]
   (cond
@@ -43,7 +50,7 @@
    claims (loop [i (+ si 1)
    acc []]
   (if (>= i n) acc (let [t (str/trim (nth lines i))]
-  (if (str/blank? t) (recur (+ i 1) acc) (let [kv (fram.rt/split-kv t)]
+  (if (str/blank? t) (recur (+ i 1) acc) (let [kv (split-kv t)]
   (recur (+ i 1) (conj acc (k/->Claim subj (nth kv 0) (parse-obj (nth kv 1))))))))))
    body (:body doc)]
   (if (str/blank? body) claims (conj claims (k/->Claim subj "body" body)))))))

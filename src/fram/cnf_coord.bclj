@@ -27,7 +27,6 @@
 (require fram.types :as t)
 (require fram.cnf :as c)
 (require fram.schema :as s)
-(require fram.kernel :as ck)
 (require clojure.string :as str)
 (require fram.rt :as rt)   ; the clj runtime the host-seam externs below bind to
 
@@ -76,17 +75,9 @@
         (s/name! (:store co) e nm tx)
         e))))
 
-;; (#12) a kernel-single predicate never def-predicate!'d defaults to "multi", so
-;; schema's link!/assert! would NOT supersede. Pin cardinality "single" (same tx)
-;; before such a write. Idempotent: only when kernel says single but store doesn't.
-(defn- ensure-single-cardinality! [co :- Coord tx :- Int pred :- String kind :- Keyword] :- Any
-  (if (and (ck/single? pred) (not (= "single" (s/cardinality (:store co) pred))))
-    (s/def-predicate! (:store co) pred "single" (if (= kind :link) "ref" "literal") tx)
-    nil))
-
 ;; --- obligation: depends_on/part_of acyclicity (pure, over resolved Int ids) -
 ;; Int reachability over the live (x,pid,_) edges. Hand-rolled (loop/recur) rather
-;; than ck/reachable-from? because that traversal is String-typed (it serves the
+;; than fram.kernel/reachable-from? because that traversal is String-typed (it serves the
 ;; name-graph); a generic [A] reachable-from? would let this reuse it (GAP-LIST).
 (defn- succ-ids [co :- Coord pid :- Int x :- Int] :- (Vec Int)
   (mapv (fn [cd :- Int] :- Int (let [r :- Int? (c/claim-r (:store co) cd)] (if (some? r) r 0)))
@@ -135,7 +126,7 @@
                   te0    :- Int? (s/resolve-name st te-name)
                   tgt0   :- Int? (if (= kind :link) (s/resolve-name st (str r-spec)) nil)
                   vid    :- Int? (if (= kind :assert) (c/value-id st r-spec) nil)
-                  single :- Bool (or (= "single" (s/cardinality st pred)) (ck/single? pred))
+                  single :- Bool (= "single" (s/cardinality st pred))
                   bv     :- Int (if (and (some? te0) (some? pid)) (base-version co te0 pid) 0)
                   live   :- (Vec Int) (if (and (some? te0) (some? pid)) (c/by-lp st te0 pid) [])]
               (cond
@@ -156,7 +147,6 @@
                  (let [since :- Int (c/next-id st)
                        tx    :- Int (c/begin-tx! st agent)
                        te    :- Int (ent! co tx te-name)]
-                   (ensure-single-cardinality! co tx pred kind)
                    (if (= kind :link)
                      (s/link! st te pred (ent! co tx (str r-spec)) tx)
                      (s/assert! st te pred r-spec tx))
@@ -175,7 +165,7 @@
             (let [st     (:store co)
                   pid    :- Int? (c/value-id st pred)
                   te0    :- Int? (s/resolve-name st te-name)
-                  single :- Bool (or (= "single" (s/cardinality st pred)) (ck/single? pred))]
+                  single :- Bool (= "single" (s/cardinality st pred))]
               (if (and (some? te0) (some? pid))
                 (let [bv :- Int (base-version co te0 pid)]
                   (if (and single (> bv base))

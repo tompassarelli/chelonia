@@ -10,7 +10,11 @@
 (defn chk [nm ok] (swap! checks conj [nm ok]))
 
 (def claims
-  [(k/->Claim "@x" "title" "X thread")     ; single, literal
+  ;; #2: cardinality is GRAPH-SOURCED — the corpus declares single-valued preds as
+  ;; (P "cardinality" "single") claims; depends_on/tag are multi by default (no claim).
+  [(k/->Claim "title" "cardinality" "single")
+   (k/->Claim "owner" "cardinality" "single")
+   (k/->Claim "@x" "title" "X thread")     ; single, literal
    (k/->Claim "@x" "owner" "personal")     ; single, literal
    (k/->Claim "@x" "depends_on" "@y")      ; multi, ref
    (k/->Claim "@y" "title" "Y thread")])

@@ -43,6 +43,9 @@
 (def log1 (str (System/getProperty "java.io.tmpdir") "/fram-set-tx-race-"
                (System/currentTimeMillis) ".log"))
 ;; on-disk reality: base @t title T (tx 1) + writer A's @t owner alice (tx 2).
+;; #2: cardinality is graph-sourced — the log declares owner single-valued so the
+;; fold supersedes (no env/hardcoded list). title is single too but irrelevant here.
+(fram.rt/append-assertion log1 (fold/->Assertion 0 "assert" "owner" "cardinality" "single" "migrate"))
 (fram.rt/append-assertion log1 (fold/->Assertion 1 "assert" "@t" "title" "T" "seed"))
 (fram.rt/append-assertion log1 (fold/->Assertion 2 "assert" "@t" "owner" "alice" "cli"))
 
@@ -79,6 +82,7 @@
 ;; and the loser is superseded (not dropped on an equal-tx tie).
 (def log2 (str (System/getProperty "java.io.tmpdir") "/fram-set-tx-cmd-"
                (System/currentTimeMillis) ".log"))
+(fram.rt/append-assertion log2 (fold/->Assertion 0 "assert" "owner" "cardinality" "single" "migrate"))
 (main/cmd-set log2 "t" "owner" "alice")
 (main/cmd-set log2 "t" "owner" "bob")
 (def owner-lines2 (filterv (fn [a] (and (= (:l a) "@t") (= (:p a) "owner")))

@@ -1,0 +1,34 @@
+#!/usr/bin/env bb
+;; ============================================================================
+;; fram-cardinality-migrate — make a flat log SELF-DESCRIBING (#2).
+;; ============================================================================
+;; Appends (P "cardinality" "single") claims for the single-valued vocab so the
+;; graph-sourced fold + coordinator read cardinality FROM THE LOG (no env
+;; FRAM_SINGLE_VALUED, no hardcoded list). The single-set heuristic lives in
+;; fram.migrate-cardinality (known thread vocab + emoji_ prefix); code-domain logs
+;; self-describe via fram-ingest-code instead.
+;;
+;; OPERATOR-RUN, DAEMON DOWN. Takes a backup first. APPENDS (existing lines + their
+;; :ts/:by stay byte-for-byte); the fold is order-independent. Idempotent.
+;;
+;;   bin/fram-cardinality-migrate <log> --yes
+;; ============================================================================
+(require '[clojure.java.io :as io]
+         '[fram.migrate-cardinality :as mc])
+
+(defn- die [& xs] (binding [*out* *err*] (apply println xs)) (System/exit 1))
+
+(let [[log flag] *command-line-args*]
+  (when-not log
+    (die "usage: fram-cardinality-migrate <log> --yes   (operator-run, daemon DOWN)"))
+  (when-not (.exists (io/file log))
+    (die "no such log:" log))
+  (when-not (= flag "--yes")
+    (die (str "refusing without --yes. This APPENDS cardinality claims to " log
+              "\nRun the daemon DOWN, with a backup. Re-run with --yes to proceed.")))
+  (let [bak (str log ".pre-cardinality.bak")]
+    (io/copy (io/file log) (io/file bak))
+    (println (str "backup -> " bak))
+    (let [n (mc/migrate-log! log)]
+      (println (str "migrated " log " — appended " n " cardinality claim(s). "
+                    "Verify with `fram validate` / a fold, then restart the daemon.")))))

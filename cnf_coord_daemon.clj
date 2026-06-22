@@ -14,8 +14,8 @@
 ;; ============================================================================
 (require '[clojure.string :as str] '[clojure.edn :as edn] '[clojure.set]
          '[fram.cnf :as c] '[fram.schema :as s]
-         '[fram.kernel :as ck]
-         '[fram.fold :as fold] '[fram.query :as q] '[fram.rt])
+         '[fram.fold :as fold] '[fram.query :as q] '[fram.rt]
+         '[fram.migrate-cardinality :as mc])
 (import '[java.net ServerSocket Socket InetSocketAddress]
         '[java.io BufferedReader InputStreamReader OutputStreamWriter BufferedWriter FileInputStream]
         '[javax.net.ssl SSLContext KeyManagerFactory TrustManagerFactory]
@@ -438,9 +438,9 @@
 ;; the daemon is a reified-engine FRONT-END over it. Boots by migrating the flat
 ;; log into the reified store; commits go through the reified coordinator AND
 ;; append the flat line; external edits (capture/import/set append out-of-band)
-;; are absorbed by re-migrating on mtime change. Cardinality comes from
-;; fram.kernel/single? (the existing canonical vocab — NO hardcoded list, so
-;; one-engine is preserved); ref-ness follows the @-prefix convention. A true
+;; are absorbed by re-migrating on mtime change. Cardinality is GRAPH-SOURCED (#2):
+;; read from the flat log's own (P "cardinality" V) claims (self-describing log),
+;; NO hardcoded list; ref-ness follows the @-prefix convention. A true
 ;; reversible drop-in for coord.clj: same log, same protocol, reified underneath.
 ;; ===========================================================================
 ;; ref-str? — a value is a node LINK iff it's a ref-shaped @-string (see ref-shape?:
@@ -452,7 +452,7 @@
 (defn migrate-flat->co [flat]
   (let [;; drop torn/partial lines BEFORE folding: the live flat log is appended
         ;; without fsync, so a copy/read caught mid-write can yield an assertion
-        ;; missing a field — and fold itself calls single? on :p, so the incomplete
+        ;; missing a field — and fold reads :p's cardinality, so the incomplete
         ;; line must be dropped pre-fold. A torn line is an incomplete write that
         ;; must NOT apply (the writer retries).
         raw (fram.rt/read-log flat)
@@ -464,16 +464,23 @@
         asserts (filter #(and (:l %) (:p %) (:r %)) raw)
         claims (:claims (fold/fold (vec asserts)))
         by-pred (group-by :p claims)
+        ;; Cardinality is GRAPH-SOURCED (#2): read each predicate's cardinality from
+        ;; the flat log's own (P "cardinality" V) claims — the migrated, self-describing
+        ;; log — NOT a hardcoded kernel list. Absent => "multi" (default). def-predicate!
+        ;; installs it on the pred's value-id where s/cardinality reads it; the raw
+        ;; (P "cardinality" V) claims are consumed here, not migrated as entity claims.
+        ;; pure derivation lives in Beagle (mc/cardinality-of-claims); the seam only orchestrates.
+        card-of (mc/cardinality-of-claims claims)
         st (c/new-store)
         tx (c/begin-tx! st "migrate")]
     (s/setup! st tx)
-    (doseq [p (keys by-pred) :when (not (schema-preds p))]   ; skip reserved engine preds (defensive)
-      (s/def-predicate! st p (if (ck/single? p) "single" "multi")
+    (doseq [p (keys by-pred) :when (and (not (schema-preds p)) (not= p "cardinality"))]
+      (s/def-predicate! st p (get card-of p "multi")
                             (if (some ref-str? (map :r (get by-pred p))) "ref" "literal") tx))
     (let [memo (atom {})
           ent! (fn [sid] (or (get @memo sid)
                              (let [id (c/entity! st)] (swap! memo assoc sid id) (s/name! st id sid tx) id)))]
-      (doseq [cl claims :when (not (schema-preds (:p cl)))]
+      (doseq [cl claims :when (and (not (schema-preds (:p cl))) (not= (:p cl) "cardinality"))]
         (let [su (ent! (:l cl)) p (:p cl) r (:r cl)]
           (if (ref-str? r) (s/link! st su p (ent! r) tx) (s/assert! st su p r tx)))))
     ;; Seed the seq-space to the flat log's max :tx so (a) :version == the flat

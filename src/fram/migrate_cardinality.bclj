@@ -1,0 +1,76 @@
+#lang beagle/clj
+(ns fram.migrate-cardinality
+  "Make a flat log SELF-DESCRIBING (#2): scan its predicates and add
+  (P \"cardinality\" \"single\") claims for the single-valued vocab, so the
+  graph-sourced fold + coordinator read each predicate's cardinality FROM THE LOG
+  itself — no env FRAM_SINGLE_VALUED, no hardcoded runtime list. The single-set
+  heuristic lives HERE, in a one-time migration, which keeps the runtime pure (it
+  reads only claims). This is the tool beagle-4 runs on the real lodestar log.
+
+  OPERATOR-RUN, daemon DOWN, with a backup — an agent must NOT run it on a live
+  canonical log. APPENDS (does not rewrite) so existing lines + their :ts/:by
+  provenance stay byte-for-byte; the fold is order-independent, so appended
+  declarations key the same as prepended. Idempotent: a single 'cardinality'
+  supersedes, so re-running collapses to one claim per predicate.")
+
+(require fram.fold :as fold)
+(require fram.kernel :as k)
+(require clojure.string :as str)
+(require fram.rt)
+
+(declare-extern fram.rt/read-log [String -> (Vec fold/Assertion)])
+(declare-extern fram.rt/append-assertion [String fold/Assertion -> Nil])
+
+;; The single-valued vocab that WAS FRAM_SINGLE_VALUED's default + the structural
+;; preds (so the log bootstraps its own metamodel). emoji_* are matched by prefix
+;; among the log's own preds. Everything else is multi (the default — no claim
+;; emitted). Code-domain preds (kind/v/pos/span/bound_to/fN) are made self-
+;; describing by fram-ingest-code at emit time, not by this thread-domain tool.
+(def single-vocab :- (Vec String)
+  ["name" "cardinality" "value_kind" "cnf-supersedes"
+   "title" "owner" "lead" "driver" "source" "part_of"
+   "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "body"
+   "created_by" "committed" "outcome" "abandoned" "superseded_by" "merged_into"
+   "session_of" "start_time" "end_time" "clockify_id"])
+
+(defn- vec-has? [xs :- (Vec String) s :- String] :- Bool
+  (loop [r xs] (if (empty? r) false (if (= (first r) s) true (recur (rest r))))))
+
+(defn single-pred? [p :- String] :- Bool
+  (or (vec-has? single-vocab p) (str/starts-with? p "emoji_")))
+
+;; distinct :p predicates appearing in the log.
+(defn- distinct-preds [asserts :- (Vec fold/Assertion)] :- (Vec String)
+  (reduce (fn [acc :- (Vec String) a :- fold/Assertion] :- (Vec String)
+            (let [p (:p a)] (if (vec-has? acc p) acc (conj acc p))))
+          [] asserts))
+
+;; one (P "cardinality" "single") assertion per single-valued predicate actually
+;; used in the log — the claims that make it self-describing. Pure; the I/O wrapper
+;; appends these. Exposed for testing the heuristic without touching a file.
+(defn cardinality-assertions [asserts :- (Vec fold/Assertion)] :- (Vec fold/Assertion)
+  (let [singles (filterv single-pred? (distinct-preds asserts))]
+    (mapv (fn [p :- String] :- fold/Assertion
+            (fold/->Assertion 0 "assert" p "cardinality" "single" "migrate"))
+          singles)))
+
+;; The cardinality lookup the warm boot-bridge needs: predicate-name -> "single"/
+;; "multi" from a folded claim set's own (P "cardinality" V) claims. Pure logic, so
+;; it lives HERE in Beagle — the daemon shim (cnf_coord_daemon, the host seam) calls
+;; this instead of inlining the reduce; the seam only orchestrates host I/O + boot.
+(defn cardinality-of-claims [claims :- (Vec k/Claim)] :- (Map String String)
+  (reduce (fn [m :- (Map String String) c :- k/Claim] :- (Map String String)
+            (if (= (:p c) "cardinality") (assoc m (:l c) (:r c)) m))
+          {} claims))
+
+;; APPEND the cardinality claims to the flat log (newest tx, monotonic over the
+;; current max). Returns how many were added. Operator-run with the daemon down.
+(defn migrate-log! [log :- String] :- Int
+  (let [as     (fram.rt/read-log log)
+        cards  (cardinality-assertions as)
+        maxtx  (fold/max-tx as)]
+    (reduce (fn [i :- Int c :- fold/Assertion] :- Int
+              (fram.rt/append-assertion
+               log (fold/->Assertion (+ maxtx (+ i 1)) "assert" (:l c) (:p c) (:r c) "migrate"))
+              (+ i 1))
+            0 cards)))

@@ -2,7 +2,6 @@
   (:require [fram.types :as t]
             [fram.cnf :as c]
             [fram.schema :as s]
-            [fram.kernel :as ck]
             [clojure.string :as str]
             [fram.rt :as rt]))
 
@@ -42,9 +41,6 @@
   (s/name! (:store co) e nm tx)
   e))))
 
-(defn- ensure-single-cardinality! [^Coord co tx ^String pred kind]
-  (if (and (ck/single? pred) (not (= "single" (s/cardinality (:store co) pred)))) (s/def-predicate! (:store co) pred "single" (if (= kind :link) "ref" "literal") tx) nil))
-
 (defn- succ-ids [^Coord co pid x]
   (mapv (fn [cd] (let [r (c/claim-r (:store co) cd)]
   (if (some? r) r 0))) (c/by-lp (:store co) x pid)))
@@ -82,7 +78,7 @@
    te0 (s/resolve-name st te-name)
    tgt0 (if (= kind :link) (s/resolve-name st (str r-spec)) nil)
    vid (if (= kind :assert) (c/value-id st r-spec) nil)
-   single (or (= "single" (s/cardinality st pred)) (ck/single? pred))
+   single (= "single" (s/cardinality st pred))
    bv (if (and (some? te0) (some? pid)) (base-version co te0 pid) 0)
    live (if (and (some? te0) (some? pid)) (c/by-lp st te0 pid) [])]
   (cond
@@ -93,7 +89,6 @@
   :else (let [since (c/next-id st)
    tx (c/begin-tx! st agent)
    te (ent! co tx te-name)]
-  (ensure-single-cardinality! co tx pred kind)
   (if (= kind :link) (s/link! st te pred (ent! co tx (str r-spec)) tx) (s/assert! st te pred r-spec tx))
   (append-tx! co (c/records-since st since tx))
   {:ok (c/tx-seq st tx)})))))]
@@ -103,7 +98,7 @@
   (let [out (rt/with-lock (:lock co) (fn [] (let [st (:store co)
    pid (c/value-id st pred)
    te0 (s/resolve-name st te-name)
-   single (or (= "single" (s/cardinality st pred)) (ck/single? pred))]
+   single (= "single" (s/cardinality st pred))]
   (if (and (some? te0) (some? pid)) (let [bv (base-version co te0 pid)]
   (if (and single (> bv base)) {:reject :conflict :version (c/current-seq st)} (let [tgt (if (and (some? r-spec) (str/starts-with? (str r-spec) "@")) (s/resolve-name st (str r-spec)) (c/value-id st r-spec))
    allc (c/by-lp st te0 pid)

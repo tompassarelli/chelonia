@@ -64,7 +64,7 @@
   (if (all-ref? claims pred) (at value) value))
 
 (defn- pred-tools [claims ^String pred]
-  (let [single (k/single? pred)
+  (let [single (k/single-in? claims pred)
    ref (ref-pred? claims pred)
    id-param [(->Param "id" "string" true)]
    idv-param [(->Param "id" "string" true) (->Param "value" "string" true)]

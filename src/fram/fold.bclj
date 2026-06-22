@@ -36,27 +36,52 @@
 ;; (l/p, and multi-valued r's, are clean refs that never contain the separator.)
 (defrecord Latest [tx :- Int op :- String l :- String p :- String r :- String frame :- String])
 
-(defn- key-of [a :- Assertion] :- String
-  (if (k/single? (:p a))
+;; Two-pass cold fold (#2): cardinality is GRAPH-SOURCED — derive each predicate's
+;; cardinality from the log's own (P "cardinality" V) claims, so cold replay and the
+;; warm store key the SAME way, with no env FRAM_SINGLE_VALUED / hardcoded list
+;; (finding #23 dissolved at the root). "cardinality" is itself single-valued, so
+;; latest-tx-wins is the right collapse; absent => "multi" (accumulate); a retracted
+;; cardinality claim reverts P to multi. This is the same fact schema/cardinality
+;; reads on the warm side.
+(defn- cardinality-map [asserts :- (Vec Assertion)] :- (Map String String)
+  (let [latest (reduce
+                (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
+                  (if (= (:p a) "cardinality")
+                    (let [k (:l a) prev (get m k) atx (tx-of a)]
+                      (if (and (some? prev) (> (:tx prev) atx))
+                        m
+                        (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a)))))
+                    m))
+                {} asserts)]
+    (reduce (fn [acc :- (Map String String) v :- Latest] :- (Map String String)
+              (if (= (:op v) "assert") (assoc acc (:l v) (:r v)) acc))
+            {} (vec (vals latest)))))
+
+;; single -> key (l,p) (latest tx wins); multi -> key (l,p,r) (accumulate). The
+;; separator below is U+0001 (clean refs never contain it) — leave those lines
+;; byte-exact.
+(defn- key-of [a :- Assertion cmap :- (Map String String)] :- String
+  (if (= "single" (get cmap (:p a)))
     (str (:l a) "" (:p a))
     (str (:l a) "" (:p a) "" (:r a))))
 
 (defn- keyed-latest [asserts :- (Vec Assertion)] :- (Map String Latest)
-  (reduce
-   (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
-     (let [k (key-of a)
-           prev (get m k)
-           atx (tx-of a)]
-       (if (and (some? prev) (> (:tx prev) atx))
-         m
-         (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a))))))
-   {}
-   asserts))
+  (let [cmap (cardinality-map asserts)]
+    (reduce
+     (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
+       (let [k (key-of a cmap)
+             prev (get m k)
+             atx (tx-of a)]
+         (if (and (some? prev) (> (:tx prev) atx))
+           m
+           (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a))))))
+     {}
+     asserts)))
 
 (defn fold [asserts :- (Vec Assertion)] :- Fold
   ;; Drop torn/partial lines (missing l/p/r) BEFORE keying — the log is appended
   ;; without fsync, so a read caught mid-write can yield an EDN-valid but incomplete
-  ;; assertion, and key-of calls single? on :p. An incomplete line is an unfinished
+  ;; assertion, and key-of reads :p's cardinality. An incomplete line is an unfinished
   ;; write that must not become a claim. max-tx still counts ALL :tx (version
   ;; high-water mark, kept consistent with the coordinator's seq seeding).
   (let [valid (filterv (fn [a :- Assertion] :- Bool

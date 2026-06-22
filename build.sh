@@ -13,7 +13,7 @@ BEAGLE="${BEAGLE_HOME:-$HOME/code/beagle}"
 mkdir -p "$OUT/fram"
 cp "$SRC/fram/rt.clj" "$OUT/fram/rt.clj"     # hand-written runtime ships as-is
 cp "$SRC/fram/json.clj" "$OUT/fram/json.clj" # JSON runtime for the clockify module
-for m in types cnf schema datalog kernel cnf_coord fold import export query tools main; do
+for m in types cnf schema datalog kernel cnf_coord fold import export query tools main migrate_cardinality; do
   BEAGLE_EMIT_SRCLOC=0 direnv exec "$BEAGLE" "$BEAGLE/bin/beagle-build" \
     "$SRC/fram/$m.bclj" "$OUT/fram/$m.clj" >/dev/null
   echo "  built fram/$m"
