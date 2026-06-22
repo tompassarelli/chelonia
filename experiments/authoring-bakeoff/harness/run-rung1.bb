@@ -26,6 +26,7 @@
 (ns run-rung1
   (:require [clojure.string :as str]
             [clojure.edn :as edn]
+            [clojure.walk :as walk]
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.java.io :as io]))
@@ -167,15 +168,91 @@
         t (if (str/includes? t "#lang") t (str "#lang beagle/clj\n" t))]
     {:text t}))
 
+;; --- M1.5 def-level apply, modeled HONESTLY (the Rung-1 false-REFERENCE_ERROR fix) ---
+;; The contract is "emit only changed defs; harness upserts at def granularity." A naive
+;; upsert-by-name was UNFAITHFUL for a RENAME in two ways, both of which the runtime grader
+;; (bb/SCI load-file) then read as a FALSE "Unable to resolve symbol":
+;;   (1) it could not DELETE the renamed-away def (old `f` left ORPHANED beside new `f2`), and
+;;   (2) it appended the new `f2` LAST — after callers g/h/k that reference it — so f2 was an
+;;       unresolved FORWARD reference at load time (the actual trigger; the orphan is benign).
+;; The honest semantics of "def-level apply" for a rename: the applied module is exactly what
+;; the model EXPRESSED — old name gone, new name present, callers consistent, in load order.
+;; We get there task-agnostically (no peeking at :rename) via two principled steps:
+;;   DROP (rename detection — the Unison structural-hash trick the master spec names): a
+;;     preserved seed def D (the model did NOT re-emit it) is dropped iff the model emitted a
+;;     NEW def D' (absent from the seed) whose BODY is STRUCTURALLY IDENTICAL to D's modulo the
+;;     def name — i.e. D was RENAMED to D'. Then a CORRECT rename loses the orphan `f`; a BAD
+;;     rename that missed a call site ALSO loses `f`, so that stale `(f …)` is genuinely
+;;     unresolved -> the grade trips a REAL REFERENCE_ERROR (the boundary master-spec §73 flags:
+;;     "unexpressible wrong-ref -> REFERENCE_ERROR"). A 1B body re-mint (no structural twin) and
+;;     an additive task (different body) detect NO rename -> nothing dropped, defs upserted/added.
+;;   ORDER (topological): emit callee-before-caller so every reference resolves at load (matches
+;;     M1's whole-module output). Model emission order seeds the tiebreak, staying faithful.
+
+(defn refs-in [form]
+  "All symbols appearing anywhere in a form (postwalk) — the reference set."
+  (let [acc (atom #{})]
+    (walk/postwalk (fn [x] (when (symbol? x) (swap! acc conj x)) x) form)
+    @acc))
+
+(defn def-shape [form]
+  "A def-form with its OWN name abstracted to a placeholder, so two defs that differ ONLY in
+   name compare equal (alpha-eq on the def name) — the structural-hash key for rename detection."
+  (when-let [n (def-name form)]
+    (walk/postwalk-replace {n '_DEFNAME_} form)))
+
+(defn topo-order [forms]
+  "Order defs callee-before-caller by def->def reference edges; model/seed order breaks ties
+   and carries non-defs. Cycles (mutual recursion) fall back to seed order for that component."
+  (let [def-names (set (keep def-name forms))
+        seed-idx  (into {} (map-indexed (fn [i f] [f i]) forms))
+        ;; for each def-form, the OTHER defs it references (its dependencies)
+        deps (into {}
+                   (for [f forms :when (def-name f)]
+                     [f (disj (set (filter def-names (refs-in f))) (def-name f))]))
+        emitted (atom [])
+        seen    (atom #{})]
+    ;; visit defs in seed order; before emitting a def, emit its (still-unseen) deps.
+    (letfn [(by-name [n] (some (fn [f] (when (= (def-name f) n) f)) forms))
+            (visit [f stack]
+              (when-not (@seen f)
+                (swap! seen conj f)
+                (when (def-name f)
+                  (doseq [dn (sort-by (fn [n] (seed-idx (by-name n) 0)) (get deps f))]
+                    (let [df (by-name dn)]
+                      (when (and df (not (@seen df)) (not (stack df)))
+                        (visit df (conj stack f))))))
+                (swap! emitted conj f)))]
+      (doseq [f (sort-by seed-idx forms)] (visit f #{})))
+    @emitted))
+
 (defn apply-m15 [current model-text _task]
   (let [cur-forms (read-forms (:text current))
         new-forms (read-forms (unfence model-text))
         new-by-name (into {} (keep (fn [f] (when-let [n (def-name f)] [n f])) new-forms))
+        re-emitted (set (keys new-by-name))
+        ;; candidate set: current defs upserted by name, in current order, + model's NEW defs
         replaced (map (fn [f] (if-let [n (def-name f)] (get new-by-name n f) f)) cur-forms)
         existing-names (set (keep def-name cur-forms))
         added (for [f new-forms :let [n (def-name f)] :when (and n (not (existing-names n)))] f)
-        all (concat replaced added)
-        text (str "#lang beagle/clj\n" (str/join "\n" (map pr-str all)) "\n")]
+        candidate (concat replaced added)
+        ;; RENAME DETECTION (structural). A model def is NEW iff its name was absent from the seed.
+        ;; For each new def, find a preserved seed def (not re-emitted) with an IDENTICAL shape
+        ;; (body modulo def-name) — that seed def was RENAMED to the new one and must be dropped.
+        existing-shapes (into {} (keep (fn [f] (when-let [n (def-name f)] [n (def-shape f)]))
+                                       cur-forms))
+        new-defs (filter #(when-let [n (def-name %)] (not (existing-names n))) new-forms)
+        renamed-away (into #{}
+                       (keep (fn [nd]
+                               (let [sh (def-shape nd)]
+                                 (some (fn [[on osh]]
+                                         (when (and (not (re-emitted on)) (= sh osh)) on))
+                                       existing-shapes)))
+                             new-defs))
+        live (remove (fn [f] (contains? renamed-away (def-name f))) candidate)
+        ;; TOPOLOGICAL ORDER: callee before caller, so load-time resolution succeeds
+        ordered (topo-order live)
+        text (str "#lang beagle/clj\n" (str/join "\n" (map pr-str ordered)) "\n")]
     {:text text}))
 
 (defn apply-m2-arm [current model-text task]
