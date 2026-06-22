@@ -20,6 +20,8 @@
 ;;       {:op "rename"         :module "greet" :old "base" :new "prefix"}
 ;;       {:op "insert-form"    :module "greet" :after "greet" :form (defn shout ...)}
 ;;       {:op "insert-comment" :module "greet" :after "greet" :text "..." :placement "leading"}
+;;       {:op "delete"         :module "greet" :name "shout"}     ; fail-closed: refuses if it orphans a ref
+;;       {:op "reorder"        :module "greet" :name "shout" :after "greet"}  ; move in place (no :after = front)
 ;;     :module falls back to --module; :note is the narration line.
 ;;   --boot    ingest <seed.bclj> into a gate-passing $PWD/.fram/author-<mod>-code.log,
 ;;             (re)boot bin/fram-daemon on --port, wait up. Self-contained demo: the
@@ -116,6 +118,8 @@
       "insert-form"    ["--after" after "--spec-file" (tmp-edn! form)]
       "insert-comment" (concat ["--after" after "--text" text]
                                (when placement ["--placement" placement]))
+      "delete"         ["--name" name]
+      "reorder"        (concat ["--name" name] (when after ["--after" after]))
       (die "unknown step op:" op))))
 
 (def ^:private receipt-re
