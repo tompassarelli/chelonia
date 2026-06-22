@@ -1,0 +1,58 @@
+;; Rung-1 task definitions — the punish-text headline (MASTER_SPEC §IV task ladder,
+;; FREEZE leakage note "Rung 1 is a multi-callsite PARAM/def rename of `f` (N≥6 sites)
+;; + a downstream signature/body change"). SEPARATE from Rung-0 tasks.edn (frozen run).
+;;
+;; The seed program (IDENTICAL across arms) is a fn `f` called from N≥6 sites across
+;; three callers g/h/k:
+;;   (defn f [x :- Int] :- Int (+ x 1))
+;;   (defn g [a :- Int] :- Int (+ (f a) (f a)))   ; 2 sites
+;;   (defn h [b :- Int] :- Int (* (f b) 2))        ; 1 site
+;;   (defn k [c :- Int] :- Int (+ (f c) (f (f c)))) ; 3 sites
+;; => 6 call sites of f (+ the def name) — verified engine ids:
+;;   def-name leaf = 8 ; call-site leaves = 33 36 51 67 70 72
+;;   f's body list = 16 (op leaf 17="+", x leaf 18, literal leaf 19="1")
+;;
+;; THESIS: M2/M1.5 follow references by identity (rename = re-spell the binding leaves
+;; the engine knows; the recompile gate proves every caller still resolves). M1 (text)
+;; must HUNT every site and rewrite — collateral exposure. 1A is the center of gravity;
+;; 1B maps the gradient (a body re-mint, where M2 has no surgical signature delta and
+;; must upsert the whole form).
+;;
+;; GRADING (shared, all arms): target-test = the edited fn behaves; preserved-tests =
+;; every caller still RESOLVES and computes the value implied by the edit (a caller that
+;; no longer resolves f / f2 => the rename/edit broke a reference = collateral/ref error).
+{:rung 1
+ :seed-text "#lang beagle/clj\n(defn f [x :- Int] :- Int (+ x 1))\n(defn g [a :- Int] :- Int (+ (f a) (f a)))\n(defn h [b :- Int] :- Int (* (f b) 2))\n(defn k [c :- Int] :- Int (+ (f c) (f (f c))))\n"
+ :tasks
+ [{:id "1A"
+   :kind :multi-callsite-rename
+   :task "Rename the function `f` to `f2` everywhere. The new name `f2` must be used at the definition AND at every call site; behavior must be unchanged."
+   :module "mod"
+   ;; the M2 model is shown the engine integer-id dump; these are the leaves to re-spell.
+   :rename {:from "f" :to "f2"
+            :def-leaf 8
+            :use-leaves [33 36 51 67 70 72]}
+   :target-fn "f2"
+   :target-test "(= 4 (beagle.user/f2 3))"   ; f2(3) = 3+1 = 4 (behavior preserved)
+   ;; every caller must still resolve (now through f2) and keep its value:
+   :preserved [{:fn "g" :test "(= 6 (beagle.user/g 2))"}    ; (2+1)+(2+1)=6
+               {:fn "h" :test "(= 6 (beagle.user/h 2))"}    ; (2+1)*2=6
+               {:fn "k" :test "(= 7 (beagle.user/k 2))"}]}  ; (2+1)+((2+1)+1)=3+4=7
+
+  {:id "1B"
+   :kind :remint-body
+   :task "Change the body of `f` so it doubles instead of increments: `f` should compute (* x 2). Do not rename `f`; do not change its signature; do not touch any other definition's wiring."
+   :module "mod"
+   ;; the body of f is list node 16: op leaf 17 ("+"), literal leaf 19 ("1").
+   ;; M2 supersedes those leaves in place (upsert the form's interior) — the gradient
+   ;; case where there is no surgical 'change-return-type' delta, only re-mint.
+   :remint {:body-list 16
+            :op-leaf 17 :op-from "+" :op-to "*"
+            :lit-leaf 19 :lit-from "1" :lit-to "2"}
+   :target-fn "f"
+   :target-test "(= 6 (beagle.user/f 3))"   ; f(3) = 3*2 = 6 (new behavior)
+   ;; callers unchanged in WIRING; their values follow the new f. A caller that fails
+   ;; to resolve or whose value is wrong = collateral damage from the body re-mint.
+   :preserved [{:fn "g" :test "(= 8 (beagle.user/g 2))"}    ; (2*2)+(2*2)=8
+               {:fn "h" :test "(= 8 (beagle.user/h 2))"}    ; (2*2)*2=8
+               {:fn "k" :test "(= 12 (beagle.user/k 2))"}]}]} ; (2*2)+((2*2)*2)=4+8=12
