@@ -43,14 +43,22 @@
 
 (defn latest-frame [r] (:frame r))
 
-(defn- ^String key-of [^Assertion a]
-  (if (k/single? (:p a)) (str (:l a) "\u0001" (:p a)) (str (:l a) "\u0001" (:p a) "\u0001" (:r a))))
+(defn- card-claims [asserts]
+  (let [latest (reduce (fn [m a] (if (= (:p a) "cardinality") (let [kk (:l a)
+   prev (get m kk)
+   atx (tx-of a)]
+  (if (and (some? prev) (> (:tx prev) atx)) m (assoc m kk (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a))))) m)) {} asserts)]
+  (reduce (fn [acc v] (if (= (:op v) "assert") (conj acc (k/->Claim (:l v) (:p v) (:r v))) acc)) [] (vec (vals latest)))))
+
+(defn- ^String key-of [cards ^Assertion a]
+  (if (k/single-from-claims? cards (:p a)) (str (:l a) "\u0001" (:p a)) (str (:l a) "\u0001" (:p a) "\u0001" (:r a))))
 
 (defn- keyed-latest [asserts]
-  (reduce (fn [m a] (let [k (key-of a)
+  (let [cards (card-claims asserts)]
+  (reduce (fn [m a] (let [k (key-of cards a)
    prev (get m k)
    atx (tx-of a)]
-  (if (and (some? prev) (> (:tx prev) atx)) m (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a)))))) {} asserts))
+  (if (and (some? prev) (> (:tx prev) atx)) m (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a)))))) {} asserts)))
 
 (defn ^Fold fold [asserts]
   (let [valid (filterv (fn [a] (and (some? (:l a)) (and (some? (:p a)) (some? (:r a))))) asserts)

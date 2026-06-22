@@ -9,8 +9,13 @@
 (def checks (atom []))
 (defn chk [nm ok] (swap! checks conj [nm ok]))
 
+;; cardinality is GRAPH-sourced (finding #23): a pred is single iff the claim set
+;; carries (<pred> cardinality "single"); absent that it defaults to multi. title
+;; + owner are declared single here; depends_on/tag carry no claim and stay multi.
 (def claims
-  [(k/->Claim "@x" "title" "X thread")     ; single, literal
+  [(k/->Claim "title" "cardinality" "single") ; graph cardinality decl
+   (k/->Claim "owner" "cardinality" "single")
+   (k/->Claim "@x" "title" "X thread")     ; single, literal
    (k/->Claim "@x" "owner" "personal")     ; single, literal
    (k/->Claim "@x" "depends_on" "@y")      ; multi, ref
    (k/->Claim "@y" "title" "Y thread")])

@@ -36,27 +36,57 @@
 ;; (l/p, and multi-valued r's, are clean refs that never contain the separator.)
 (defrecord Latest [tx :- Int op :- String l :- String p :- String r :- String frame :- String])
 
-(defn- key-of [a :- Assertion] :- String
-  (if (k/single? (:p a))
+;; CARDINALITY comes from the GRAPH (finding #23): a pred is single-valued iff the
+;; log carries a `(<pred> cardinality "single")` claim. We build a fold-local map
+;; in a FIRST pass over the assertions, so the keying pass is ORDER-INDEPENDENT — a
+;; `cardinality` claim anywhere in the log governs every use of that pred (it need
+;; NOT physically precede first use). card-claims collapses each (predName,
+;; "cardinality") group latest-tx-wins (same rule as any single-valued claim) and
+;; exposes it as a (Vec Claim) the kernel reader (k/single-from-claims?) folds.
+;; Default is MULTI for a pred with no cardinality claim (byte-identical to warm).
+(defn- card-claims [asserts :- (Vec Assertion)] :- (Vec k/Claim)
+  (let [latest (reduce
+                (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
+                  (if (= (:p a) "cardinality")
+                    (let [kk (:l a)
+                          prev (get m kk)
+                          atx (tx-of a)]
+                      (if (and (some? prev) (> (:tx prev) atx))
+                        m
+                        (assoc m kk (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a)))))
+                    m))
+                {}
+                asserts)]
+    (reduce
+     (fn [acc :- (Vec k/Claim) v :- Latest] :- (Vec k/Claim)
+       (if (= (:op v) "assert")
+         (conj acc (k/->Claim (:l v) (:p v) (:r v)))
+         acc))
+     []
+     (vec (vals latest)))))
+
+(defn- key-of [cards :- (Vec k/Claim) a :- Assertion] :- String
+  (if (k/single-from-claims? cards (:p a))
     (str (:l a) "" (:p a))
     (str (:l a) "" (:p a) "" (:r a))))
 
 (defn- keyed-latest [asserts :- (Vec Assertion)] :- (Map String Latest)
-  (reduce
-   (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
-     (let [k (key-of a)
-           prev (get m k)
-           atx (tx-of a)]
-       (if (and (some? prev) (> (:tx prev) atx))
-         m
-         (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a))))))
-   {}
-   asserts))
+  (let [cards (card-claims asserts)]
+    (reduce
+     (fn [m :- (Map String Latest) a :- Assertion] :- (Map String Latest)
+       (let [k (key-of cards a)
+             prev (get m k)
+             atx (tx-of a)]
+         (if (and (some? prev) (> (:tx prev) atx))
+           m
+           (assoc m k (->Latest atx (:op a) (:l a) (:p a) (:r a) (:frame a))))))
+     {}
+     asserts)))
 
 (defn fold [asserts :- (Vec Assertion)] :- Fold
   ;; Drop torn/partial lines (missing l/p/r) BEFORE keying — the log is appended
   ;; without fsync, so a read caught mid-write can yield an EDN-valid but incomplete
-  ;; assertion, and key-of calls single? on :p. An incomplete line is an unfinished
+  ;; assertion, and key-of keys on :p. An incomplete line is an unfinished
   ;; write that must not become a claim. max-tx still counts ALL :tx (version
   ;; high-water mark, kept consistent with the coordinator's seq seeding).
   (let [valid (filterv (fn [a :- Assertion] :- Bool

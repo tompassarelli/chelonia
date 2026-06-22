@@ -72,19 +72,15 @@
   (or (s/resolve-name (store co) nm)
       (let [e (c/entity! (store co))] (s/name! (store co) e nm tx) e)))
 
-;; finding #12: a brand-new predicate has NO cardinality claim, so s/cardinality
-;; defaults to "multi" — and s/link!/s/assert! only supersede a prior value when
-;; the STORE records cardinality=="single" (they don't consult ck/single?). So a
-;; kernel-single predicate that was never def-predicate!'d (e.g. one not present
-;; in the flat log at migration) would have its first write NOT supersede,
-;; accumulating duplicate live values. Before such a write, pin the store's
-;; cardinality to "single" (in the SAME tx) so the schema layer supersedes
-;; correctly. Idempotent: only fires when the kernel says single but the store
-;; doesn't already record it, so an already-defined-single predicate is untouched.
-(defn- ensure-single-cardinality! [co tx pred kind]
-  (when (and (ck/single? pred) (not= "single" (s/cardinality (store co) pred)))
-    (s/def-predicate! (store co) pred "single"
-                      (if (= kind :link) "ref" "literal") tx)))
+;; finding #23: CARDINALITY is read from the GRAPH — a predicate is single-valued
+;; iff the store carries its `cardinality "single"` claim (seeded at migrate-time
+;; from the log's `cardinality` claims; see cnf_coord_daemon/migrate-flat->co).
+;; The old kernel env-`single?` fallback + the finding-#12 `ensure-single-
+;; cardinality!` band-aid are GONE: there is no second cardinality source to
+;; reconcile against, so a single-valued pred MUST carry its cardinality claim in
+;; the log (the migration tool backfills any log that predates this). A pred with
+;; no cardinality claim is genuinely MULTI here, exactly as the cold fold + the
+;; warm schema layer agree.
 
 ;; --- obligation: depends_on/part_of acyclicity (pure, over resolved ids) ----
 (defn- succ [co pid x]
@@ -125,7 +121,7 @@
           te0    (s/resolve-name (store co) te-name)
           tgt0   (when (= kind :link) (s/resolve-name (store co) r-spec))
           vid    (when (= kind :assert) (c/value-id (store co) r-spec))
-          single (or (= "single" (s/cardinality (store co) pred)) (ck/single? pred))
+          single (= "single" (s/cardinality (store co) pred))
           bv     (if (and te0 pid) (base-version co te0 pid) 0)
           live   (if (and te0 pid) (live-cids-lp co te0 pid) [])
           claims (:claims @(store co))]
@@ -149,7 +145,6 @@
         (let [since (:next-id @(store co))
               tx (c/begin-tx! (store co) agent)
               te (ent! co tx te-name)]
-          (ensure-single-cardinality! co tx pred kind)   ; (#12) supersede on first single write
           (case kind
             :link   (s/link! (store co) te pred (ent! co tx r-spec) tx)
             :assert (s/assert! (store co) te pred r-spec tx))
@@ -164,7 +159,7 @@
   (locking (:lock co)
     (let [pid    (c/value-id (store co) pred)
           te0    (s/resolve-name (store co) te-name)
-          single (or (= "single" (s/cardinality (store co) pred)) (ck/single? pred))]
+          single (= "single" (s/cardinality (store co) pred))]
       (if (or (nil? te0) (nil? pid))
         {:ok (current-seq co)}                              ; nothing to retract
         (let [bv (base-version co te0 pid)]

@@ -5,7 +5,8 @@
   after the claims: `owner-of`, `set-owner`, `depends_on-from`, `dependents-of`.
   Priors live in the tool NAMES; validation is server-side (missing required
   params are rejected, not silently run). The catalog is DERIVED from the current
-  fold — each predicate's cardinality (kernel/single?) and value-kind (@-ref
+  fold — each predicate's cardinality (kernel/single-from-claims?, read from the
+  log's `cardinality` claims) and value-kind (@-ref
   convention) decide which tools exist — so the engine stays domain-neutral: point
   Fram at a different corpus and the catalog regenerates. The one non-tool surface,
   `query`, is the structured Datalog escape hatch (fram.query) for ad-hoc recursion
@@ -100,7 +101,7 @@
 
 ;; --- catalog: derive the tool specs from the vocabulary ----------------------
 (defn- pred-tools [claims :- (Vec k/Claim) pred :- String] :- (Vec ToolSpec)
-  (let [single (k/single? pred)
+  (let [single (k/single-from-claims? claims pred)
         ref (ref-pred? claims pred)
         id-param :- (Vec Param) [(->Param "id" "string" true)]
         idv-param :- (Vec Param) [(->Param "id" "string" true) (->Param "value" "string" true)]

@@ -1,9 +1,6 @@
 (ns fram.kernel
   (:require [clojure.string :as str]))
 
-(def single-valued (let [env (System/getenv "FRAM_SINGLE_VALUED")]
-  (if (and (some? env) (not (= env ""))) (vec (str/split env #"\s+")) ["title" "owner" "lead" "driver" "source" "part_of" "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "name" "body" "created_by" "committed" "outcome" "abandoned" "superseded_by" "merged_into" "session_of" "start_time" "end_time" "clockify_id"])))
-
 (def terminal-preds (let [env (System/getenv "FRAM_TERMINAL_PREDS")]
   (if (and (some? env) (not (= env ""))) (vec (str/split env #"\s+")) ["outcome" "abandoned"])))
 
@@ -14,18 +11,11 @@
   (loop [r xs]
   (if (empty? r) false (if (= (first r) s) true (recur (rest r))))))
 
-(defn ^Boolean single-valued-from-env? []
-  (let [env (System/getenv "FRAM_SINGLE_VALUED")]
-  (and (some? env) (not (= env "")))))
-
 (defn- ^String sorted-join [xs]
   (str/join "," (vec (sort xs))))
 
 (defn ^String vocab-fingerprint []
-  (str "single=" (sorted-join single-valued) " |terminal=" (sorted-join terminal-preds) " |withdrawn=" (sorted-join withdrawn-preds)))
-
-(defn ^Boolean single? [^String p]
-  (or (vec-contains? single-valued p) (and (string? p) (str/starts-with? p "emoji_"))))
+  (str "terminal=" (sorted-join terminal-preds) " |withdrawn=" (sorted-join withdrawn-preds)))
 
 (defrecord Claim [l p r])
 
@@ -51,6 +41,13 @@
 (defn many [claims ^String l ^String p]
   (mapv (fn [c] (:r c)) (q-lp claims l p)))
 
+(defn ^String cardinality-of [claims ^String p]
+  (let [c (one claims p "cardinality")]
+  (if (some? c) c "multi")))
+
+(defn ^Boolean single-from-claims? [claims ^String p]
+  (= "single" (cardinality-of claims p)))
+
 (defn- ^Boolean any-of? [claims ^String te preds]
   (loop [ps preds]
   (if (empty? ps) false (if (some? (one claims te (first ps))) true (recur (rest ps))))))
@@ -72,10 +69,10 @@
   (if (empty? r) false (if (claim-eq? (first r) c) true (recur (rest r))))))
 
 (defn apply-assert [claims ^Claim c]
-  (if (single? (:p c)) (conj (drop-lp claims (:l c) (:p c)) c) (if (has-claim? claims c) claims (conj claims c))))
+  (if (single-from-claims? claims (:p c)) (conj (drop-lp claims (:l c) (:p c)) c) (if (has-claim? claims c) claims (conj claims c))))
 
 (defn apply-retract [claims ^Claim c]
-  (if (single? (:p c)) (drop-lp claims (:l c) (:p c)) (filterv (fn [x] (not (claim-eq? x c))) claims)))
+  (if (single-from-claims? claims (:p c)) (drop-lp claims (:l c) (:p c)) (filterv (fn [x] (not (claim-eq? x c))) claims)))
 
 (defn ^Boolean reachable-from? [succ frontier ^String target]
   (loop [front frontier

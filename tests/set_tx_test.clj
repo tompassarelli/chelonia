@@ -42,11 +42,16 @@
 ;; A real log file backs the append (cmd-set's append goes through to disk).
 (def log1 (str (System/getProperty "java.io.tmpdir") "/fram-set-tx-race-"
                (System/currentTimeMillis) ".log"))
+;; cardinality is GRAPH-sourced (finding #23): owner is single-valued iff the log
+;; carries (owner cardinality "single"). Seed it (tx 0) so the cold fold supersedes
+;; owner correctly; the two-pass fold is order-independent so position doesn't matter.
+(fram.rt/append-assertion log1 (fold/->Assertion 0 "assert" "owner" "cardinality" "single" "schema"))
 ;; on-disk reality: base @t title T (tx 1) + writer A's @t owner alice (tx 2).
 (fram.rt/append-assertion log1 (fold/->Assertion 1 "assert" "@t" "title" "T" "seed"))
 (fram.rt/append-assertion log1 (fold/->Assertion 2 "assert" "@t" "owner" "alice" "cli"))
 
-(def short-log [(fold/->Assertion 1 "assert" "@t" "title" "T" "seed")])  ; B's stale entry view
+(def short-log [(fold/->Assertion 0 "assert" "owner" "cardinality" "single" "schema")
+                (fold/->Assertion 1 "assert" "@t" "title" "T" "seed")])  ; B's stale entry view
 (def reads (atom 0))
 (def real-read-log fram.rt/read-log)
 (with-redefs [fram.rt/read-log
@@ -79,6 +84,8 @@
 ;; and the loser is superseded (not dropped on an equal-tx tie).
 (def log2 (str (System/getProperty "java.io.tmpdir") "/fram-set-tx-cmd-"
                (System/currentTimeMillis) ".log"))
+;; declare owner single-valued in the graph (finding #23) before the sets.
+(fram.rt/append-assertion log2 (fold/->Assertion 0 "assert" "owner" "cardinality" "single" "schema"))
 (main/cmd-set log2 "t" "owner" "alice")
 (main/cmd-set log2 "t" "owner" "bob")
 (def owner-lines2 (filterv (fn [a] (and (= (:l a) "@t") (= (:p a) "owner")))

@@ -1328,10 +1328,11 @@
 ;; the daemon is a reified-engine FRONT-END over it. Boots by migrating the flat
 ;; log into the reified store; commits go through the reified coordinator AND
 ;; append the flat line; external edits (capture/import/set append out-of-band)
-;; are absorbed by re-migrating on mtime change. Cardinality comes from
-;; fram.kernel/single? (the existing canonical vocab — NO hardcoded list, so
-;; one-engine is preserved); ref-ness follows the @-prefix convention. A true
-;; reversible drop-in for coord.clj: same log, same protocol, reified underneath.
+;; are absorbed by re-migrating on mtime change. Cardinality comes from the GRAPH
+;; — the log's `cardinality` claims (ck/cardinality-of, default multi), the SAME
+;; source the cold fold + warm schema layer use (finding #23, one source of
+;; truth); ref-ness follows the @-prefix convention. A true reversible drop-in for
+;; coord.clj: same log, same protocol, reified underneath.
 ;; ===========================================================================
 ;; ref-str? — a value is a node LINK iff it's a ref-shaped @-string (see ref-shape?:
 ;; "@" + ≥1 char + no whitespace). A bare "@" / "@ " literal (a comment lexeme about
@@ -1342,7 +1343,7 @@
 (defn migrate-flat->co [flat]
   (let [;; drop torn/partial lines BEFORE folding: the live flat log is appended
         ;; without fsync, so a copy/read caught mid-write can yield an assertion
-        ;; missing a field — and fold itself calls single? on :p, so the incomplete
+        ;; missing a field — and fold keys on :p, so the incomplete
         ;; line must be dropped pre-fold. A torn line is an incomplete write that
         ;; must NOT apply (the writer retries).
         raw (fram.rt/read-log flat)
@@ -1357,8 +1358,14 @@
         st (c/new-store)
         tx (c/begin-tx! st "migrate")]
     (s/setup! st tx)
+    ;; finding #23: CARDINALITY is seeded FROM THE GRAPH — (ck/cardinality-of claims p)
+    ;; reads the log's `(<pred> cardinality "single"|"multi")` claim (default multi),
+    ;; the SAME source the cold fold + warm schema layer use. No kernel env-`single?`
+    ;; fallback: a single-valued pred MUST carry its cardinality claim in the log
+    ;; (the migration tool backfills any pre-#23 log). This def-predicate! writes the
+    ;; cardinality claim INTO the store so s/cardinality reads it on every write.
     (doseq [p (keys by-pred) :when (not (schema-preds p))]   ; skip reserved engine preds (defensive)
-      (s/def-predicate! st p (if (ck/single? p) "single" "multi")
+      (s/def-predicate! st p (ck/cardinality-of claims p)
                             (if (some ref-str? (map :r (get by-pred p))) "ref" "literal") tx))
     (let [memo (atom {})
           ent! (fn [sid] (or (get @memo sid)

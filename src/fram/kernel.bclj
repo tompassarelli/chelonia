@@ -11,20 +11,19 @@
 ;; Lifecycle is NOT a stored enum — it's derived from these structural facts:
 ;; commitment (`committed`), completion (`outcome`), withdrawal (`abandoned`),
 ;; activity (`driver`/clock, derived), blocked (`depends_on`, derived).
-;; Cardinality vocab is INJECTED by the app (lodestar exports FRAM_SINGLE_VALUED,
-;; space-separated) — the engine hard-codes NO domain vocab of its own. The literal
-;; below is a TRANSITIONAL fallback for back-compat (tests / un-wrapped invocation);
-;; it goes away once every caller sets the env. (§1.1, fram/lodestar un-tangle.)
-(def single-valued :- (Vec String)
-  (let [env :- Any (System/getenv "FRAM_SINGLE_VALUED")]
-    (if (and (some? env) (not (= env "")))
-      (vec (str/split env #"\s+"))
-      ["title" "owner" "lead" "driver" "source" "part_of"
-       "do_on" "valid_until" "estimate_hours" "created_at" "updated_at" "name" "body"
-       "created_by" "committed" "outcome" "abandoned" "superseded_by" "merged_into"
-       "session_of" "start_time" "end_time" "clockify_id"])))
+;;
+;; CARDINALITY is NOT injected vocab — the GRAPH is the single source of truth
+;; (finding #23). A predicate is single-valued iff the claim set carries a
+;; `(<pred> cardinality "single")` claim; absent that claim it defaults to multi
+;; (byte-identical to the warm path, schema/cardinality). The old
+;; FRAM_SINGLE_VALUED env list + its hardcoded transitional fallback + the
+;; `emoji_`-prefix OR are GONE: a stale-env divergence between a long-lived daemon
+;; and a short-lived CLO can no longer classify the same predicate differently,
+;; because both fold the SAME cardinality claims out of the SAME log. See
+;; `cardinality-of` / `single-from-claims?` below; the cold fold consults a
+;; fold-local cardinality map (fram.fold) built from these claims.
 
-;; Injected LIFECYCLE vocab (mirrors single-valued — the consumer declares it):
+;; Injected LIFECYCLE vocab (the consumer declares it):
 ;; "terminal" = resolved (done/canceled); "withdrawn" = a depends_on target that's
 ;; suspect to depend on. The kernel keeps the derivation MACHINERY but takes the
 ;; predicate NAMES as config, so it carries no baked-in lifecycle vocab a consumer
@@ -48,53 +47,18 @@
       false
       (if (= (first r) s) true (recur (rest r))))))
 
-;; --- cardinality-config observability (finding #23) --------------------------
-;; The single-valued / terminal / withdrawn vocab is read from the env ONCE at
-;; namespace-load (the defs above). A long-lived daemon and a short-lived CLI
-;; therefore freeze WHATEVER env each saw at its own boot — and if those differ
-;; (the daemon started before FRAM_SINGLE_VALUED was exported, or with a different
-;; list) the cold fold and the daemon's reified store classify the SAME predicate's
-;; cardinality differently, diverging the replay/live view with nothing flagging it.
-;;
-;; CONSISTENCY REQUIREMENT: every process folding/serving one log MUST load the
-;; SAME FRAM_SINGLE_VALUED / FRAM_TERMINAL_PREDS / FRAM_WITHDRAWN_PREDS. The fix
-;; for the LOW finding is to make a mismatch NON-SILENT rather than to re-plumb
-;; cardinality through the log (assessed below): deriving cardinality from
-;; def-predicate!/cardinality claims would change the log format, the import path,
-;; and fold's signature (fold would need the whole claim set to find the
-;; declarations before it can key) — too large, and risky, for a LOW config-seam
-;; gap. Instead the kernel exposes a deterministic FINGERPRINT of the active
-;; vocab + whether the env (vs the transitional fallback) is in effect, and the
-;; CLI surfaces both in `doctor` so an operator can eyeball CLI-vs-daemon agreement
-;; and a no-env fallback is loud rather than silent.
-
-;; True iff FRAM_SINGLE_VALUED was actually set (so `single-valued` is the
-;; injected vocab); false means the TRANSITIONAL hardcoded fallback is live —
-;; the precise divergence vector ("daemon booted before the env was added").
-(defn single-valued-from-env? [] :- Bool
-  (let [env :- Any (System/getenv "FRAM_SINGLE_VALUED")]
-    (and (some? env) (not (= env "")))))
-
-;; Order-independent fingerprint of the ACTIVE cardinality/lifecycle vocab. Two
-;; processes with the same effective config produce the same string; any
-;; difference (extra/missing pred, or env-vs-fallback yielding a different list)
-;; produces a different string. Sorted so list-order can't make equal configs
-;; look different. This is the value an operator compares across CLI and daemon.
+;; --- lifecycle-vocab observability ------------------------------------------
+;; terminal/withdrawn are still env-injected lifecycle vocab read ONCE at
+;; namespace-load; two processes serving one log must agree on them. Cardinality
+;; is NO LONGER part of this surface — it rides the log as `cardinality` claims
+;; (finding #23 closed), so the daemon-vs-CLI cardinality-divergence vector this
+;; fingerprint used to guard against is gone at the root.
 (defn- sorted-join [xs :- (Vec String)] :- String
   (str/join "," (vec (sort xs))))
 
 (defn vocab-fingerprint [] :- String
-  (str "single=" (sorted-join single-valued)
-       " |terminal=" (sorted-join terminal-preds)
+  (str "terminal=" (sorted-join terminal-preds)
        " |withdrawn=" (sorted-join withdrawn-preds)))
-
-;; `emoji_*` are presentation-config predicates (e.g. @ui emoji_blocked "🧱") —
-;; single-valued by prefix so re-configuring replaces, with no per-key listing.
-(defn single? [p :- String] :- Bool
-  ;; (string? p) guards str/starts-with? against a non-string p — defense in depth
-  ;; so a stray/torn record can't NPE the whole cold-read path (fold already drops
-  ;; torn lines; this is the belt to that suspenders).
-  (or (vec-contains? single-valued p) (and (string? p) (str/starts-with? p "emoji_"))))
 
 ;; --- the claim -------------------------------------------------------------
 
@@ -123,6 +87,28 @@
 
 (defn many [claims :- (Vec Claim) l :- String p :- String] :- (Vec String)
   (mapv (fn [c :- Claim] :- String (:r c)) (q-lp claims l p)))
+
+;; --- cardinality, read from the GRAPH (single source of truth) --------------
+;; A predicate is single-valued iff the claim set carries a
+;; `(<pred> cardinality "single")` claim — subject = the predicate NAME (a
+;; string), p = "cardinality", r = "single"|"multi". Mirrors the warm path
+;; EXACTLY (fram.schema/def-predicate! writes the same claim, fram.schema/
+;; cardinality reads it): absent any cardinality claim a predicate DEFAULTS TO
+;; MULTI. `emoji_*` presentation preds are no longer single by prefix — they
+;; carry a real `cardinality single` claim (written by the app's setup / the
+;; migration tool), so cold + warm agree on them too.
+;;
+;; This is a pure (l p r)-string read. The cold fold (fram.fold/key-of) consults
+;; a fold-local map built once from ALL `cardinality` claims, so the cardinality
+;; claim's POSITION in the log doesn't matter — order-independent. The cold-write
+;; path (apply-assert/apply-retract) calls single-from-claims? with the
+;; already-folded claim set in hand.
+(defn cardinality-of [claims :- (Vec Claim) p :- String] :- String
+  (let [c (one claims p "cardinality")]
+    (if (some? c) c "multi")))
+
+(defn single-from-claims? [claims :- (Vec Claim) p :- String] :- Bool
+  (= "single" (cardinality-of claims p)))
 
 ;; terminal = resolved: any of the injected terminal-preds (default outcome/abandoned).
 (defn- any-of? [claims :- (Vec Claim) te :- String preds :- (Vec String)] :- Bool
@@ -154,13 +140,16 @@
       false
       (if (claim-eq? (first r) c) true (recur (rest r))))))
 
+;; cardinality is read from the SAME claim set being amended — a single-valued
+;; pred (one carrying a `cardinality single` claim) supersedes the prior (l,p);
+;; multi appends. Default multi when no cardinality claim is present (warm parity).
 (defn apply-assert [claims :- (Vec Claim) c :- Claim] :- (Vec Claim)
-  (if (single? (:p c))
+  (if (single-from-claims? claims (:p c))
     (conj (drop-lp claims (:l c) (:p c)) c)
     (if (has-claim? claims c) claims (conj claims c))))
 
 (defn apply-retract [claims :- (Vec Claim) c :- Claim] :- (Vec Claim)
-  (if (single? (:p c))
+  (if (single-from-claims? claims (:p c))
     (drop-lp claims (:l c) (:p c))
     (filterv (fn [x :- Claim] :- Bool (not (claim-eq? x c))) claims)))
 

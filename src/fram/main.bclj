@@ -195,28 +195,19 @@
 ;; coordinator liveness probe — `fram-up` greps for "coordinator UP" to know the
 ;; daemon answered (the readiness half of the up handshake).
 ;;
-;; Also prints THIS process's cardinality-vocab fingerprint + whether it came from
-;; FRAM_SINGLE_VALUED or the transitional fallback (finding #23). The vocab is
-;; frozen per-process at namespace-load from the env; a daemon and a CLI that saw
-;; different env silently classify the same predicate's cardinality differently and
-;; diverge the live view. Surfacing the fingerprint here makes a mismatch eyeball-
-;; checkable across the two processes (run `fram doctor` in each), and a no-env
-;; fallback prints a loud note instead of passing silently — the divergence is no
-;; longer silent. (Consistency requirement: every process folding/serving one log
-;; MUST load the same FRAM_SINGLE_VALUED — see fram.kernel.)
+;; Also prints THIS process's LIFECYCLE-vocab fingerprint (terminal/withdrawn,
+;; still env-injected). CARDINALITY is no longer part of this surface — it rides
+;; the log as `cardinality` claims (finding #23 closed at the root), so a daemon
+;; and a CLI fold the SAME cardinality out of the SAME log and can no longer
+;; classify a predicate differently. The old FRAM_SINGLE_VALUED env source note
+;; is gone with the env.
 (defn cmd-doctor [] :- Nil
   (let [port (fram.rt/coord-port)
         v (fram.rt/coord-version port)]
     (if (>= v 0)
       (println (str "coordinator UP on 127.0.0.1:" port " (v" v ")"))
       (println (str "coordinator DOWN on 127.0.0.1:" port " — start it with bin/fram-up")))
-    (println (str "vocab " (k/vocab-fingerprint)))
-    (if (k/single-valued-from-env?)
-      (println "vocab-source: FRAM_SINGLE_VALUED (injected)")
-      (println (str "vocab-source: TRANSITIONAL FALLBACK — FRAM_SINGLE_VALUED is UNSET in this "
-                    "process. If the daemon and this CLI disagree on it, the cold fold and the "
-                    "daemon's store classify cardinality differently (divergent live view). "
-                    "Export the SAME FRAM_SINGLE_VALUED in every process that folds/serves this log.")))))
+    (println (str "lifecycle-vocab " (k/vocab-fingerprint)))))
 
 ;; --- AI-facing tool surface (catalog + dispatch; see fram.tools / fram.query) -
 ;; The catalog is generated from the claim vocabulary; `query` is the structured
