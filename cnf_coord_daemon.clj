@@ -62,7 +62,7 @@
 (def do-assert cd/do-assert!) (def do-retract cd/do-retract!)
 
 
-(def dlock (Object.))                ; serializes reload + writes + reads (drop-in mode)
+(def dlock cd/dlock)                 ; shared monitor (lives in cd) so do-edit-min in fram.coord-resolver locks the SAME object as the shim's outer handle
 
 ;; ---- DoS hardening knobs (findings #2/#5/#19/#20) --------------------------
 ;; Read timeout on every accepted socket — mirrors the CLIENT side (fram.rt

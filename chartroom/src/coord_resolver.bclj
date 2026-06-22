@@ -314,3 +314,50 @@
     {:scoped-size (count scoped) :ground-size (count ground)
      :symdiff-size (count symdiff) :symdiff (vec (take 40 symdiff))
      :version (cd/cur-seq)}))
+
+;; ============================================================================
+;; CUT 3b: the resolver-woven WRITE path — persist-bound-for-rename! + do-edit-min.
+;; The authoring write seam: run a verb over a CLONE, harvest the minimal delta as
+;; wire ops, commit through cd/do-assert!/do-retract! under the shared cd/dlock.
+;; ============================================================================
+
+;; #(a) O(1) rename precondition: before renaming a def, PERSIST a durable bound_to edge
+;; from every reference of it to the def's stable @mod#int. The rename then changes only
+;; the binding's display name; references keep their identity edge and a cold re-render
+;; follows it to the CURRENT name (instead of re-deriving by spelling and missing the
+;; renamed def). Idempotent. Runs under the commit dlock (do-edit-min holds it; ONE
+;; acquisition). ensure-refers! materializes warm refers_to; B = the def binding node;
+;; for each referencing leaf landing on B, do-assert! a bound_to link (leaf -> B's name).
+;; bound_to is multi-valued, survives strip-resolve-claims!, hidden from read projections.
+(defn- persist-bound-for-rename! [spec :- (Map Keyword Any)] :- Any
+  (ensure-refers!)
+  (let [co0  :- Any (deref cd/co)
+        st   :- (Atom t/Store) (:store co0)
+        REFp :- Int? (c/value-id st "refers_to")
+        B    :- Int? (target-node {:module (:module spec) :name (:old spec)})]
+    (if (some? B)
+      (if (some? REFp)
+        (let [Bn      :- Int B
+              REFpn   :- Int REFp
+              BND     :- Int (or (c/value-id st "bound_to") (c/value! st "bound_to"))
+              v0      :- Int (cd/cur-seq)
+              B-name  :- String (or (s/name-of st Bn) "")
+              already :- (Set Int)
+                (set (keep (fn [cid :- Int] :- Int?
+                             (let [c0 :- (U (Map Keyword Any) Nil) (c/claim-of st cid)]
+                               (if (some? c0) (let [l :- Int (:l c0)] l) nil)))
+                           (c/by-p st BND)))
+              ref-leaves :- (Vec Int)
+                (vec (distinct
+                       (keep (fn [cid :- Int] :- Int?
+                               (let [c0 :- (U (Map Keyword Any) Nil) (c/claim-of st cid)]
+                                 (if (some? c0)
+                                   (if (= Bn (:r c0)) (let [l :- Int (:l c0)] l) nil)
+                                   nil)))
+                             (c/by-p st REFpn))))]
+          (doseq [leaf :- Int ref-leaves]
+            (if (not (contains? already leaf))
+              (cd/do-assert! (or (s/name-of st leaf) "") "bound_to" B-name v0)
+              nil)))
+        nil)
+      nil)))

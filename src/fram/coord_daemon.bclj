@@ -42,6 +42,8 @@
 (declare-extern fram.rt/file-stamp [String -> String])                   ; lastModified:length (external-edit detect)
 (declare-extern fram.rt/write-flat-lines! [String (Vec String) -> Nil])  ; append lines + ONE fsync
 (declare-extern fram.rt/notify-subs! [Any -> Nil])                       ; best-effort subscriber delivery (rt owns the registry)
+(declare-extern fram.rt/new-monitor [-> Any])                            ; a fresh JVM monitor (Object) for the write lock
+(declare-extern fram.rt/with-lock [Any [-> Any] -> Any])                 ; serialize a thunk under the monitor (locking)
 
 ;; The warm read index: the triple SET + two regroupings (by-[p r] for the datalog
 ;; probe, by-[l p] to scope a write's delta to its (l,p) group). A typed record (the
@@ -388,6 +390,13 @@
 (def last-materialize :- (Atom Any) (atom (let [x :- Any nil] x)))
 (def corpus-groups :- (Atom Any) (atom (let [x :- Any nil] x)))
 (def node-name-seq :- (Atom Int) (atom 0))
+
+;; the write lock — ONE JVM monitor that serializes the commit phase of every write op
+;; (do-edit-min's commit, the shim's outer handle). Lives here in cd so both this
+;; module's consumers AND fram.coord-resolver (do-edit-min, a separate module) lock the
+;; SAME monitor; with-dlock! is the typed wrapper coord-resolver calls.
+(def dlock :- Any (rt/new-monitor))
+(defn with-dlock! [thunk :- [-> Any]] :- Any (rt/with-lock dlock thunk))
 
 ;; commit-batch: the flat-log lines of ONE commit, flushed+fsync'd once (1 fsync per
 ;; commit, not per claim). nil => write each line immediately (single-op callers).
