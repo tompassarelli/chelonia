@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# ============================================================================
+# fram-code-live — code-as-claims LIVE FEED, Phase 2: the PROPER live-authoring
+#                  stream. Edit a real .bclj -> its graph MOVES on :7979 live.
+# ============================================================================
+# Phase 1 (bin/fram-code-demo) REPLAYS a pre-baked log with timing — a demo of
+# framescope rendering a code graph assembling. This is the real thing: it boots
+# the code daemon from the ACTUAL corpus, then WATCHES the source .bclj files and
+# commits each edit's AST delta into the running daemon incrementally. Point
+# framescope at the daemon's port and the graph reshapes as you (or an agent) save.
+#
+# Pipeline (all pre-existing; this just composes + watches them — NO beagle change):
+#   .bclj edit  ->  racket --emit-edn (beagle, pure fn)  ->  changed-node diff vs
+#   the live daemon (bin/fram-commit-code)  ->  :assert/:retract over the coord wire.
+# A 1-line edit is a handful of ops (measured: 1 node / 4 ops), NOT a module churn.
+#
+#   bin/fram-code-live <src.bclj|src-dir> [more...]   boot + ingest + watch (default)
+#   bin/fram-code-live ... --once                     boot, commit the FIRST edit, exit
+#   bin/fram-code-live stop                           kill the live daemon
+#
+# Opts:
+#   --port P     code daemon port (default 7979 — the framescope CODE port)
+#   --log  L     live corpus log (default .fram/live-code.log; MUST end in code.log
+#                so fram-commit-code's safety gate accepts it as a CODE log)
+#   --no-boot    skip ingest+boot; attach the watcher to an already-running daemon
+#   --poll MS    mtime poll interval (default 400)
+#   --once       after boot, block until the first file change, commit it, then exit
+# ============================================================================
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$HERE"
+
+PORT=7979
+LIVE_LOG="$HERE/.fram/live-code.log"
+NO_BOOT=0
+POLL_MS=400
+ONCE=0
+SRCS=()
+
+# ---- args -------------------------------------------------------------------
+case "${1:-}" in
+  stop)
+    P="${3:-7979}"; [[ "${2:-}" == "--port" ]] && P="$3"
+    PIDF="$HERE/.fram/code-daemon-$P.pid"
+    if [[ -f "$PIDF" ]] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+      kill "$(cat "$PIDF")" 2>/dev/null || true; rm -f "$PIDF"
+      echo "fram-code-live: stopped live daemon on :$P"
+    else echo "fram-code-live: no tracked daemon on :$P"; fi
+    exit 0 ;;
+esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --port)    PORT="$2"; shift 2 ;;
+    --log)     LIVE_LOG="$2"; shift 2 ;;
+    --no-boot) NO_BOOT=1; shift ;;
+    --poll)    POLL_MS="$2"; shift 2 ;;
+    --once)    ONCE=1; shift ;;
+    *)         SRCS+=("$1"); shift ;;
+  esac
+done
+[[ ${#SRCS[@]} -gt 0 ]] || { echo "usage: bin/fram-code-live <src.bclj|src-dir> [more...] [--port P] [--once]" >&2; exit 1; }
+# safety: the commit gate keys off the log basename containing "code.log".
+[[ "$(basename "$LIVE_LOG")" == *code.log ]] || { echo "fram-code-live: --log must end in code.log (got $(basename "$LIVE_LOG"))" >&2; exit 1; }
+
+DLOG="$HERE/.fram/code-daemon-$PORT.log"
+PIDF="$HERE/.fram/code-daemon-$PORT.pid"
+module_of() { local b; b="$(basename "$1")"; echo "${b%.bclj}"; }
+
+# expand srcs (dirs -> their *.bclj) into the concrete watch set.
+WATCH=()
+for s in "${SRCS[@]}"; do
+  if [[ -d "$s" ]]; then while IFS= read -r f; do WATCH+=("$f"); done < <(find "$s" -maxdepth 1 -name '*.bclj' | sort)
+  elif [[ -f "$s" && "$s" == *.bclj ]]; then WATCH+=("$s")
+  else echo "fram-code-live: skip (not a .bclj or dir): $s" >&2; fi
+done
+[[ ${#WATCH[@]} -gt 0 ]] || { echo "fram-code-live: no .bclj files to watch" >&2; exit 1; }
+
+daemon_up() { bb -e '(require (quote [clojure.edn :as edn]))(import (quote [java.net Socket InetSocketAddress]))
+  (try (with-open [s (Socket.)] (.connect s (InetSocketAddress. "127.0.0.1" (Integer/parseInt (first *command-line-args*))) 800)
+    (let [w (.getOutputStream s) r (clojure.java.io/reader (.getInputStream s))]
+      (.write w (.getBytes "{:op :version}\n")) (.flush w)
+      (if (:version (edn/read-string (.readLine r))) (System/exit 0) (System/exit 1))))
+    (catch Exception _ (System/exit 1)))' "$PORT" >/dev/null 2>&1; }
+
+if [[ "$NO_BOOT" -eq 0 ]]; then
+  if daemon_up; then
+    echo "fram-code-live: daemon ALREADY up on :$PORT — refusing to re-ingest (use --no-boot to attach, or stop first)." >&2
+    exit 1
+  fi
+  echo "fram-code-live: ingesting ${#WATCH[@]} module(s) -> $LIVE_LOG (full corpus, NOT empty)"
+  bin/fram-ingest-code "${WATCH[@]}" --out "$LIVE_LOG" >/dev/null
+  echo "fram-code-live: launching live code daemon on :$PORT over $LIVE_LOG  (log: $DLOG)"
+  nohup "$HERE/bin/fram-daemon" "$PORT" "$LIVE_LOG" >"$DLOG" 2>&1 &
+  echo $! > "$PIDF"
+  printf "fram-code-live: waiting for :%s" "$PORT"
+  for _ in $(seq 1 80); do daemon_up && { echo " up."; break; }; printf "."; sleep 0.5; done
+  daemon_up || { echo " TIMEOUT — see $DLOG" >&2; exit 1; }
+else
+  daemon_up || { echo "fram-code-live: --no-boot but no daemon on :$PORT" >&2; exit 1; }
+fi
+
+echo "  ┌─ LIVE — edit any watched .bclj and its graph moves on :$PORT ────────"
+for f in "${WATCH[@]}"; do echo "  │  watch  $f  (@$(module_of "$f"))"; done
+echo "  │  framescope:  cd ~/code/framescope && bin/framescope  ->  :8088/?port=$PORT"
+echo "  │  stop:        bin/fram-code-live stop --port $PORT"
+echo "  └──────────────────────────────────────────────────────────────────────"
+
+# commit one module's current text into the live daemon (surgical changed-node delta).
+commit_one() {
+  local f="$1" mod; mod="$(module_of "$f")"
+  if out="$(bb -cp out "$HERE/bin/fram-commit-code" "$mod" "$f" --port "$PORT" 2>&1 | grep -vE 'WARNING|already refers')"; then
+    echo "  ● $(date -u +%H:%M:%S) @$mod  $(echo "$out" | grep -oE '[0-9]+ assert.*retract[^)]*' | head -1)"
+  else
+    # mid-edit / parse error: leave it; the next save (parseable) retries.
+    echo "  ⚠ $(date -u +%H:%M:%S) @$mod commit skipped (emit-edn/parse failed mid-edit?)" >&2
+  fi
+}
+
+# ---- watch loop: mtime poll, debounced, parse-tolerant ----------------------
+declare -A MT
+for f in "${WATCH[@]}"; do MT["$f"]="$(stat -c %Y "$f" 2>/dev/null || echo 0)"; done
+SLEEP="$(awk "BEGIN{print $POLL_MS/1000}")"
+while true; do
+  sleep "$SLEEP"
+  for f in "${WATCH[@]}"; do
+    [[ -f "$f" ]] || continue
+    now="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+    if [[ "$now" != "${MT[$f]}" ]]; then
+      sleep 0.2                      # settle: let the editor finish the write
+      MT["$f"]="$(stat -c %Y "$f" 2>/dev/null || echo "$now")"
+      commit_one "$f"
+      [[ "$ONCE" -eq 1 ]] && { echo "fram-code-live: --once — committed first edit, exiting."; exit 0; }
+    fi
+  done
+done
