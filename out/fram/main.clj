@@ -35,10 +35,12 @@
   (fram.rt/write-log log as)
   (println (str "imported -> " (count as) " claims -> " log))))))
 
-(defn cmd-export [^String threads-dir ^String log ^String out-dir]
+(defn cmd-export [^String threads-dir ^String log ^String out-dir ^Boolean force]
   (let [log-claims (:claims (fold/fold (fram.rt/read-log log)))
-   file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))]
-  (if (not (= (sig-set log-claims) (sig-set file-claims))) (println (str "REFUSING export: threads/ has changes not in the log " "(concurrent edits?). Run `import` first, or write via the coordinator.")) (let [idx (k/build-index log-claims)
+   file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))
+   log-sigs (sig-member-map log-claims)
+   file-ahead (filterv (fn [c] (nil? (get log-sigs (claim-sig c)))) file-claims)]
+  (if (and (not (empty? file-ahead)) (not force)) (println (str "REFUSING export: " (count file-ahead) " file claim(s) are not in the log " "(a thread .md was hand-edited). Merge them via the coordinator (`tell`), or " "`export <dir> --force` to regenerate files FROM the log (discards those edits).")) (let [idx (k/build-index log-claims)
    tes (k/thread-ids-i idx)]
   (fram.rt/ensure-dir out-dir)
   (doseq [te tes]
@@ -163,7 +165,7 @@
   (let [cmd (if (empty? args) "" (first args))]
   (cond
   (= cmd "import") (cmd-import threads-dir log (and (> (count args) 1) (= (nth args 1) "--force")))
-  (= cmd "export") (if (> (count args) 1) (cmd-export threads-dir log (nth args 1)) (println "usage: export <out-dir>"))
+  (= cmd "export") (if (> (count args) 1) (cmd-export threads-dir log (nth args 1) (and (> (count args) 2) (= (nth args 2) "--force"))) (println "usage: export <out-dir> [--force]"))
   (= cmd "validate") (cmd-validate log)
   (= cmd "watch") (cmd-watch)
   (= cmd "doctor") (cmd-doctor)

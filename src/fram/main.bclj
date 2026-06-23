@@ -71,12 +71,20 @@
 
 ;; Inverse of import: fold the log -> write each thread as markdown into out-dir.
 ;; SAFETY: refuse if threads/ holds edits not yet in the log (would clobber).
-(defn cmd-export [threads-dir :- String log :- String out-dir :- String] :- Nil
+(defn cmd-export [threads-dir :- String log :- String out-dir :- String force :- Bool] :- Nil
   (let [log-claims (:claims (fold/fold (fram.rt/read-log log)))
-        file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))]
-    (if (not (= (sig-set log-claims) (sig-set file-claims)))
-      (println (str "REFUSING export: threads/ has changes not in the log "
-                    "(concurrent edits?). Run `import` first, or write via the coordinator."))
+        file-claims (:claims (fold/fold (imp/load-corpus threads-dir)))
+        log-sigs (sig-member-map log-claims)
+        ;; file-ahead = a thread .md holds a claim the log LACKS (a hand edit) — the
+        ;; ONLY thing export could clobber. Log-ahead (claims in the log not yet in
+        ;; files) is the normal case export EXISTS to flush, NEVER a reason to refuse.
+        ;; (The old guard demanded full set-equality, so it refused on log-ahead and
+        ;; deadlocked with import — each refused, pointing at the other.)
+        file-ahead (filterv (fn [c :- k/Claim] :- Bool (nil? (get log-sigs (claim-sig c)))) file-claims)]
+    (if (and (not (empty? file-ahead)) (not force))
+      (println (str "REFUSING export: " (count file-ahead) " file claim(s) are not in the log "
+                    "(a thread .md was hand-edited). Merge them via the coordinator (`tell`), or "
+                    "`export <dir> --force` to regenerate files FROM the log (discards those edits)."))
       (let [idx (k/build-index log-claims)
             tes (k/thread-ids-i idx)]
         (fram.rt/ensure-dir out-dir)
@@ -282,8 +290,9 @@
        (cmd-import threads-dir log (and (> (count args) 1) (= (nth args 1) "--force")))]
       [(= cmd "export")
        (if (> (count args) 1)
-         (cmd-export threads-dir log (nth args 1))
-         (println "usage: export <out-dir>"))]
+         (cmd-export threads-dir log (nth args 1)
+                     (and (> (count args) 2) (= (nth args 2) "--force")))
+         (println "usage: export <out-dir> [--force]"))]
       [(= cmd "validate") (cmd-validate log)]
       [(= cmd "watch")    (cmd-watch)]
       [(= cmd "doctor")   (cmd-doctor)]
