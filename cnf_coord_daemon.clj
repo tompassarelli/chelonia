@@ -1261,8 +1261,20 @@
 ;; request returns a clean {:error} line (or just drops the conn) instead of
 ;; killing the per-connection thread. A reply is best-effort: if writing it also
 ;; throws (socket already gone), we still hit the finally and close.
-(defn- try-reply [^BufferedWriter w resp]
-  (try (.write w (pr-str resp)) (.newLine w) (.flush w) (catch Throwable _ nil)))
+;; Response wire format is EDN by DEFAULT (every existing client — byte-identical to
+;; before). A request carrying {:fmt :json} (or "json") OPTS IN to cheshire JSON
+;; instead (fram.rt/to-json = cheshire/generate-string): the Elixir client decodes
+;; JSON ~90x faster than EDN (eden), so an opt-in JSON :query is the first-load/refresh
+;; win. Gated purely on :fmt — no :fmt => pr-str, exactly as today.
+(defn- serialize-resp [fmt resp]
+  (if (or (= fmt :json) (= fmt "json"))
+    (fram.rt/to-json resp)
+    (pr-str resp)))
+
+(defn- try-reply
+  ([^BufferedWriter w resp] (try-reply w resp nil))
+  ([^BufferedWriter w resp fmt]
+   (try (.write w (serialize-resp fmt resp)) (.newLine w) (.flush w) (catch Throwable _ nil))))
 
 (defn serve-conn [^Socket s]
   (try
@@ -1282,7 +1294,7 @@
                   (.setSoTimeout s 0)
                   (.write w (pr-str {:subscribed (current-seq @co)})) (.newLine w) (.flush w)
                   (loop [] (when (read-line-bounded r max-line-bytes) (recur))))
-              (let [resp (handle req)] (try-reply w resp)))))
+              (let [resp (handle req)] (try-reply w resp (:fmt req))))))
         ;; StackOverflowError is an Error (not Exception); catching Throwable here
         ;; keeps a deep-nest / malformed line from taking down the conn thread.
         (catch java.net.SocketTimeoutException _ nil)   ; slow client: just close
