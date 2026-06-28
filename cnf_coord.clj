@@ -82,9 +82,42 @@
 ;; nil on an empty group. (`view` attaches here when first-class views land — thread E.)
 (defn agent-of [co cid]
   (let [m @(store co)] (get-in m [:txs (get (:tx-of m) cid) :agent])))
-(defn elect [co cids]
-  (when (seq cids)
-    (first (sort-by (fn [cid] [cid (str (agent-of co cid))]) cids))))
+
+;; --- views-as-claims (thread E): per-branch isolation over the same log ------
+;; A VIEW is a first-class subject; (view selects @cid) claims are its OVERLAY —
+;; the cids it treats as facts. The object IS a claim id: cids live in the same
+;; flat content-interned id-space, so a claim is itself addressable (the most
+;; CNF-native of VIEWS_AND_BRANCHES §8's three encodings). view-selects returns
+;; the live overlay; nil when the view subject or `selects` predicate was never
+;; minted (an unknown view selects nothing -> it inherits main).
+(defn view-selects [co view]
+  (let [m   @(store co)
+        ve  (s/resolve-name (store co) view)
+        sel (c/value-id (store co) "selects")]
+    (when (and ve sel)
+      (set (keep #(:r (get (:claims m) %))
+                 (remove #(contains? (:superseded m) %)
+                         (get (:idx-by-lp m) [ve sel])))))))
+
+;; elect — the read-time election, now VIEW-RELATIVE (thread E generalizes move-B's
+;; default-main `elect` to `elect(view, cids)`; `(first cids)`'s descendant gains a view):
+;;   * 2-arity / view=nil / "main": the privileged DEFAULT view — elect over the WHOLE
+;;     live group by [cid, agent]. BYTE-IDENTICAL to move-B (branch overlays never touch
+;;     the bare group, so main is isolated from every branch's writes).
+;;   * 3-arity named view V: PER-BRANCH ISOLATION — restrict the group to the cids V
+;;     `selects`, then elect among those. A branch sees ONLY its own selected rival on a
+;;     contended (s,p); sibling branches' (and main's bare) rivals are invisible to it.
+;;   * inherit-the-base: where V selects NONE of THIS group (silent on this (s,p)), V
+;;     falls back to the default election over the whole group — "one head + named
+;;     overlays" (VIEWS §8): a view is main plus only the claims it overrides.
+(defn elect
+  ([co cids] (elect co nil cids))
+  ([co view cids]
+   (when (seq cids)
+     (let [sel     (when view (view-selects co view))
+           in-view (when (seq sel) (filterv sel cids))
+           pool    (if (seq in-view) in-view cids)]
+       (first (sort-by (fn [cid] [cid (str (agent-of co cid))]) pool))))))
 
 (defn- ent! [co tx nm]
   (or (s/resolve-name (store co) nm)
@@ -185,6 +218,45 @@
             :assert (s/assert! (store co) te pred r-spec tx))
           (append-tx! co (delta-records co since tx))   ; (5) atomic + fsync
           {:ok (get-in @(store co) [:txs tx :seq])})))))
+
+;; --- views-as-claims writers (thread E) -------------------------------------
+;; select! asserts (view selects @cid): `view` now treats claim `cid` as a fact. Multi
+;; (a view selects many claims); idempotent when it already selects cid. This ONE write
+;; is the whole branch-membership surface — per-branch isolation is otherwise pure
+;; read-time election (elect above), no writer ever blocked.
+(defn select! [co view cid]
+  (locking (:lock co)
+    (let [selp    (c/value-id (store co) "selects")
+          ve0     (s/resolve-name (store co) view)
+          already (when (and selp ve0)
+                    (some #(= cid (:r (get (:claims @(store co)) %)))
+                          (live-cids-lp co ve0 selp)))]
+      (if already
+        {:ok (current-seq co) :idempotent true :cid cid}
+        (let [since (:next-id @(store co))
+              tx    (c/begin-tx! (store co) view)
+              ve    (ent! co tx view)
+              sp    (c/value! (store co) "selects")]
+          (c/claim! (store co) ve sp cid tx)            ; object IS the selected claim's cid
+          (append-tx! co (delta-records co since tx))
+          {:ok (get-in @(store co) [:txs tx :seq]) :cid cid})))))
+
+;; commit-on-view! — write a rival claim AND select it into `view` in one breath: the
+;; "write on a branch" verb. Always coexists (no base -> never staleness-rejected); the
+;; new rival is the highest live cid on (te,pred), so THAT cid is selected into the branch.
+;; Reentrant lock (commit!/select! re-enter — JVM monitors are reentrant, as release-lease!
+;; already relies on). Returns the new claim's cid. The lock spans both writes so a
+;; concurrent reader never sees the rival un-selected (committed but not yet on its branch).
+(defn commit-on-view! [co view agent te-name pred kind r-spec]
+  (locking (:lock co)
+    (let [r (commit! co agent te-name pred kind r-spec nil)]
+      (if-not (:ok r)
+        r
+        (let [te  (s/resolve-name (store co) te-name)
+              pid (c/value-id (store co) pred)
+              cid (apply max (live-cids-lp co te pid))]   ; the just-written rival = newest live cid
+          (select! co view cid)
+          {:ok (:ok r) :cid cid})))))
 
 ;; retract: single-valued clears (te,pred); multi-valued removes the (te,pred,r)
 ;; edge. Same lock + base_version contract as commit! — clearing a driver out
