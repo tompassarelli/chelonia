@@ -153,8 +153,16 @@
           live   (if (and te0 pid) (live-cids-lp co te0 pid) [])
           claims (:claims @(store co))]
       (cond
-        ;; (1)(6) base_version: reject a stale single-valued write
-        (and single (> bv base))
+        ;; (1)(6) base_version: reject a stale single-valued write — ONLY when a base
+        ;; was supplied (move-C: :base is OPTIONAL). The cardinality-typed verbs split
+        ;; here: append!/put! pass NO base (nil) and are NEVER staleness-rejected
+        ;; (multi coexists; single is last-writer-wins); only swap! passes a base and
+        ;; opts into compare-and-swap. `and` short-circuits on nil base, so `(> bv base)`
+        ;; is never reached with a nil base (no NPE). base 0 is a REAL base (fresh
+        ;; subject, bv=0), still checked — only a MISSING base means LWW. The
+        ;; id-collision / reserved-predicate rejections are base-independent (below) and
+        ;; untouched.
+        (and single base (> bv base))
         {:reject :conflict :version (current-seq co)}
 
         ;; (2)(3) obligation: acyclicity — pure pre-check, before any mutation
@@ -190,7 +198,7 @@
       (if (or (nil? te0) (nil? pid))
         {:ok (current-seq co)}                              ; nothing to retract
         (let [bv (base-version co te0 pid)]
-          (if (and single (> bv base))
+          (if (and single base (> bv base))   ; move-C: :base optional here too (symmetric, nil-safe)
             {:reject :conflict :version (current-seq co)}
             (let [tgt (if (and r-spec (str/starts-with? (str r-spec) "@"))
                         (s/resolve-name (store co) r-spec)
