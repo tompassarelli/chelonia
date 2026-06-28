@@ -96,21 +96,41 @@
 ;; point: it does NOT prove uniqueness, it SELECTS the default-main member of a possibly-multi
 ;; group. Routing the former bare `(first …)` take-firsts through it makes the selection named
 ;; rather than silently buried; when first-class views land (VIEWS_AND_BRANCHES §8) this is
-;; where a `view` argument attaches. Behavior today is identical to `first`.
+;; where a `view` argument attaches (thread E: it now does, via `*view*`).
+;; *view* — the read-side attach point first-class views land on (VIEWS_AND_BRANCHES §8;
+;; thread E). nil = the privileged default-main view (today's only view): elect the whole
+;; group, byte-identical to before. Bound to a view-subject NAME = a named branch overlay:
+;; restrict the election to the cids that view selects ((view selects @cid) claims), so the
+;; resolver renders a *branch's* line of the code, isolated from main and sibling branches.
+(def ^:dynamic *view* nil)
+(defn view-cids
+  "cids of `cids` that view `v` selects via live (v selects @cid) claims — the resolve-layer
+   twin of cnf_coord/view-selects. nil/empty when v selects NONE of them, so the caller
+   inherits the default-main election (one head + named overlays). The view subject and
+   `selects` predicate are store value-ids; an unknown view resolves to nil -> selects nothing."
+  [v cids]
+  (let [SEL (c/value-id ctx "selects") ve (c/value-id ctx v)]
+    (when (and SEL ve)
+      (let [sel (set (keep (fn [scid] (:r (c/claim-of ctx scid))) (c/by-lp ctx ve SEL)))]
+        (filter sel cids)))))
 (defn select-main-1
-  "Coexist-elect read-time election of the default-main member of a (live) (l,p) claim-id group
-   `cids`: the winner is the EARLIEST claim by the total key [cid, writing-agent]. cids are
-   cid-ascending under the single allocator, so this is BYTE-IDENTICAL to (first cids); the
-   agent tiebreak only keeps the order total if cid allocation is ever sharded. Every reader
-   computes it identically with zero coordination — the same election the engine coordinator
-   runs (cnf_coord/elect). Returns nil on an empty group. Degrades to (first cids) when no store
-   is bound (pure cid-vector callers, e.g. the honesty-pass unit), so it stays a function of
-   cids alone there."
+  "Coexist-elect, VIEW-RELATIVE read-time election of the `*view*` member of a (live) (l,p)
+   claim-id group `cids`: the winner is the EARLIEST claim by the total key [cid, writing-agent].
+   cids are cid-ascending under the single allocator, so the default (*view*=nil = main) is
+   BYTE-IDENTICAL to (first cids); the agent tiebreak only keeps the order total if cid
+   allocation is ever sharded. A bound `*view*` restricts the group to that view's selected cids
+   (per-branch isolation), inheriting main where the view is silent. Every reader computes it
+   identically with zero coordination — the same election the engine coordinator runs
+   (cnf_coord/elect). Returns nil on an empty group. Degrades to (first cids) when no store is
+   bound (pure cid-vector callers, e.g. the honesty-pass unit), so it stays a function of cids
+   alone there."
   [cids]
   (when (seq cids)
     (if (nil? ctx)
       (first cids)
-      (first (sort-by (fn [cid] [cid (str (get-in @ctx [:txs (get (:tx-of @ctx) cid) :agent]))]) cids)))))
+      (let [in-view (when *view* (view-cids *view* cids))
+            pool    (if (seq in-view) in-view cids)]
+        (first (sort-by (fn [cid] [cid (str (get-in @ctx [:txs (get (:tx-of @ctx) cid) :agent]))]) pool))))))
 
 (defn pred-val
   "The default-main value of predicate `pname` on node `e`. `pname` may be multi-valued in the
