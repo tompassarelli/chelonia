@@ -30,6 +30,14 @@ mapfile -t SRCS < <(find "$DIR" -name '*.bclj' -not -path '*/.fram/*' | sort)
 ( cd "$HERE" && BEAGLE_HOME="$BEAGLE_HOME" bin/fram-ingest-code "${SRCS[@]}" --out "$CODE_LOG" ) \
   && echo "        ${#SRCS[@]} modules, $(wc -l <"$CODE_LOG") claims -> $CODE_LOG"
 
+# 1b. resolve AST -> reference graph (corpus) for REASONING. code.log is the editing
+#     AST (tree); the corpus is the resolved who-calls/blast-radius GRAPH (callgraph needs it).
+CORPUS="$DIR/.fram/corpus.claims"
+echo "  [1b]  resolving -> reference graph (for who-calls/blast-radius) …"
+( cd "$HERE/chartroom" && BEAGLE_HOME="$BEAGLE_HOME" bin/emit-corpus "$DIR" "$CORPUS" >/dev/null 2>&1 ) \
+  && echo "        corpus: $(wc -l <"$CORPUS" 2>/dev/null) claims -> $CORPUS" \
+  || echo "        (corpus skipped — authoring still works; reasoning needs emit-corpus)"
+
 # 2. boot the warm coordinator (detached — survives this shell)
 if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
   echo "  [2/3] coordinator already on :$PORT (reusing)"
@@ -77,6 +85,8 @@ Authoring: (re)start Claude Code in $DIR — you now have mcp__fram__add-def /
   set-body / rename-def / insert-after, authoring INTO the claim graph (warm,
   no re-fold; edits type-checked + pointed Beagle errors returned for repair).
 Reason over the code graph (blast-radius / who-calls), any time:
-  bb -cp $HERE/out:$HERE/chartroom/src $HERE/chartroom/src/callgraph.clj $CODE_LOG
+  bb -cp $HERE/out:$HERE/chartroom/src $HERE/chartroom/src/callgraph.clj $CORPUS
+Or race it vs grep on any function:
+  $HERE/../after-text/experiments/authoring-bakeoff/race/reason-race.sh <fn>
 Turn OFF: $HERE/bin/fram-code-off $DIR
 EOF
