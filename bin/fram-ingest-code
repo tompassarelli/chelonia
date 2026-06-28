@@ -1,6 +1,6 @@
 #!/usr/bin/env bb
 ;; ============================================================================
-;; fram-ingest-code — THE FLIP, stage 1: .bclj source tree -> canonical CODE log.
+;; fram-ingest-code — THE FLIP, stage 1: Beagle source tree -> canonical CODE log.
 ;; ============================================================================
 ;; Demotes .bclj TEXT from source-of-truth to a generated view: ingest each
 ;; module's AST (via `racket --emit-edn`) into a per-repo, dedicated flat claim
@@ -63,19 +63,25 @@
       (= "--append" (first a)) (recur (rest a) (assoc opts :append true))
       :else                    (recur (rest a) (update opts :srcs conj (first a))))))
 
-(defn- bclj-files [path]
+;; Any Beagle source extension — the extension only selects the EMIT TARGET
+;; (.bclj->clj .bcljs->cljs .bjs->js .bnix->nix .bgl->neutral .bodin->odin;
+;; dormant .bsql/.bpy/.bzig). The parsed AST is target-INDEPENDENT, so ingest is too.
+(def ^:private beagle-ext-re #"\.b(clj|cljs|js|nix|gl|sql|py|zig|odin)$")
+(defn- beagle-file? [p] (boolean (re-find beagle-ext-re p)))
+
+(defn- beagle-files [path]
   (let [f (io/file path)]
     (cond
-      (and (.isFile f) (str/ends-with? path ".bclj")) [path]
+      (and (.isFile f) (beagle-file? path)) [path]
       (.isDirectory f) (->> (.listFiles f)
                             (map #(.getPath ^java.io.File %))
-                            (filter #(str/ends-with? % ".bclj"))
+                            (filter beagle-file?)
                             sort vec)
       :else [])))
 
-;; module name from a .bclj path: the file's basename without extension. schema.bclj
+;; module name from a Beagle path: basename without the .b* extension. schema.bclj
 ;; -> "schema". This is the @<module># prefix the resolver groups by (name->module).
-(defn- module-of [path] (-> path io/file .getName (str/replace #"\.bclj$" "")))
+(defn- module-of [path] (-> path io/file .getName (str/replace beagle-ext-re "")))
 
 ;; --- emit-edn one module, parse to [s p o] triples ---------------------------
 ;; emit-edn prints `@file <path>` then one `[s "pred" o]` per line. o is an INTEGER
@@ -117,9 +123,9 @@
   (when (empty? srcs) (die "usage: bin/fram-ingest-code <src> [<src>...] [--out <log>] [--module <name>] [--append]"))
   (when-not (.exists (io/file roundtrip-rkt))
     (die "missing claims-roundtrip.rkt at" roundtrip-rkt "(set FRAM_ROUNDTRIP / BEAGLE_HOME)"))
-  (let [files (->> srcs (mapcat bclj-files) distinct sort
+  (let [files (->> srcs (mapcat beagle-files) distinct sort
                    (filter (fn [p] (or (nil? module) (str/includes? p module)))))]
-    (when (empty? files) (die "no .bclj modules matched" (pr-str srcs) (when module (str "(module filter: " module ")"))))
+    (when (empty? files) (die "no Beagle modules matched" (pr-str srcs) (when module (str "(module filter: " module ")"))))
     (log! "fram-ingest-code: folding" (count files) "module(s) ->" out-path
           (when module (str "(module filter: " module ")")))
     (let [all-claims (mapcat module->claims files)
@@ -144,4 +150,4 @@
       (log! "fram-ingest-code: wrote" (count all-claims) "AST claims"
             (str "(" (count files) " module(s); ids re-keyed @<mod>#<n>)"))
       (doseq [f files] (log! "  +" (module-of f) "<-" f))
-      (log! "DONE — the .bclj is now downstream of" out-path))))
+      (log! "DONE — the Beagle source is now downstream of" out-path))))

@@ -22,11 +22,13 @@ mkdir -p "$DIR/.fram"
 
 echo "fram-code-on: $DIR (port $PORT)"
 
-# 1. ingest the code into claims (deterministic, no LLM) — recurse for .bclj
-#    (fram-ingest-code is non-recursive + .bclj-only; feed it the files we find)
+# 1. ingest the code into claims (deterministic, no LLM) — recurse for ANY Beagle source.
+#    The extension only picks the emit target (.bclj->clj .bcljs->cljs .bjs->js .bnix->nix
+#    .bgl->neutral .bodin->odin); the parsed AST is target-independent, so ingest is too.
+#    fram-ingest-code is non-recursive, so we find + feed it every Beagle file here.
 echo "  [1/3] ingesting code -> claims …"
-mapfile -t SRCS < <(find "$DIR" -name '*.bclj' -not -path '*/.fram/*' | sort)
-[ "${#SRCS[@]}" -eq 0 ] && { echo "        no .bclj files under $DIR (fram-code-on ingests .bclj projects today)"; exit 1; }
+mapfile -t SRCS < <(find "$DIR" -regextype posix-extended -regex '.*\.b(clj|cljs|js|nix|gl|sql|py|zig|odin)$' -not -path '*/.fram/*' | sort)
+[ "${#SRCS[@]}" -eq 0 ] && { echo "        no Beagle source (.bclj/.bcljs/.bjs/.bnix/.bgl/.bodin) under $DIR"; exit 1; }
 ( cd "$HERE" && BEAGLE_HOME="$BEAGLE_HOME" bin/fram-ingest-code "${SRCS[@]}" --out "$CODE_LOG" ) \
   && echo "        ${#SRCS[@]} modules, $(wc -l <"$CODE_LOG") claims -> $CODE_LOG"
 
