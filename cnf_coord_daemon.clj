@@ -1133,6 +1133,9 @@
            :version (current-seq @co)}))))))
 
 (declare maybe-reload!)
+;; thread 019f100f-7fff: snapshot/tail-fold/as-of/incremental-aggregate surface,
+;; defined below migrate-flat->co (so they can call it) but referenced in handle.
+(declare write-snapshot! snapshot-reconcile materialize-as-of register-agg! agg-report sweep-snapshots! built-through)
 
 (defn handle [req]
   ;; (#14 socket EXPOSURE) :edit-min runs OUTSIDE the outer dlock. do-edit-min's compute
@@ -1195,6 +1198,12 @@
                      :inc-triples (count (:triples (:idx inc))) :fresh-triples (count (:triples fidx))
                      :version (current-seq @co)})
       :status   {:version (current-seq @co) :claims (count (c/current-claims (:store @co))) :log (or @flat-log (:log @co))}
+      ;; thread 019f100f-7fff — snapshot/compaction surface:
+      ;; :snapshot writes a checkpoint (dump-log! image + @snapshot:<seq> claims);
+      ;; :snapshot-reconcile is the gate (live store == from-scratch whole migrate).
+      :snapshot           (if @flat-log (write-snapshot! @co @flat-log) {:error "snapshot needs flat-log (drop-in) mode"})
+      :snapshot-reconcile (snapshot-reconcile)
+      :built-through      {:built-through @built-through :version (current-seq @co)}
       ;; warm scope-correct callers of a binding, served from refers_to materialized
       ;; over `co` (version-cached). ensure-refers! whole-corpus re-resolves only when
       ;; the code version moved (the correct first cut); the reverse lookup is then a
@@ -1496,34 +1505,232 @@
     ;; daemon's append-flat!; the reified store must NOT dump v2 :k-records into it.
     {:store st :log nil :lock (Object.)}))
 
+;; ===========================================================================
+;; SNAPSHOT / TAIL-FOLD / AS-OF / INCREMENTAL AGGREGATES (thread 019f100f-7fff)
+;; ---------------------------------------------------------------------------
+;; The flat fold (fram.fold) is KEYED-LATEST-BY-:tx: a single-valued predicate keys
+;; on (l,p) [an LWW cell]; a multi on (l,p,r) [the edge]; per key the MAX-:tx line
+;; wins and a `retract` whose :tx dominates drops the key. So for ANY key first
+;; touched in a tail T past a snapshot at seq N, every tail line has :tx > N >= every
+;; snapshot-era line for that key — the tail's max-:tx line for the key dominates the
+;; whole history. THEREFORE: per-key keyed-latest over T, applied onto the snapshot
+;; store (whose keys T is silent on are left untouched), reconstructs EXACTLY a full
+;; fold of the whole log. That is the whole correctness argument for incremental boot
+;; + tail-fold reload + as-of; it is GATED at runtime by snapshot-reconcile (diff the
+;; incremental store's live name-triples against a from-scratch whole-migrate).
+;; This is the fix for the mislabeled "single-writer" bottleneck: the writer's one
+;; job (id allocation) STAYS single + serialized; what was O(history) — boot re-fold
+;; and the whole-log re-migrate on EVERY out-of-band append — becomes O(delta).
+;; ===========================================================================
+
+;; the highest flat :tx the live store reflects, and the flat-log byte length at that
+;; point. flat-bytes is a SEEK HINT for the tail read; correctness is the :tx filter
+;; (risk guard: "anchor boot on :tx (monotonic), not byte_offset").
+(def built-through (atom 0))
+(def flat-bytes    (atom 0))
+
+(defn- snap-dir [flat] (str flat ".snapshots"))
+(defn- snap-image [flat seq] (str (snap-dir flat) "/snap-" seq ".v2log"))
+(defn- sidecar-path [flat] (str flat ".snap"))      ; latest-snapshot pointer (O(1) boot hint)
+
+(defn- sha256-file [path]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        buf (byte-array 65536)]
+    (with-open [is (java.io.FileInputStream. (str path))]
+      (loop [] (let [n (.read is buf)] (when (pos? n) (.update md buf 0 n) (recur)))))
+    (apply str (map #(format "%02x" %) (.digest md)))))
+
+(defn- read-sidecar [flat]
+  (let [f (java.io.File. (sidecar-path flat))]
+    (when (.exists f)
+      (try (edn/read-string (slurp f)) (catch Exception _ nil)))))
+(defn- write-sidecar! [flat m] (spit (sidecar-path flat) (pr-str m)))
+
+(defn- skip-fully! [^java.io.InputStream is ^long n]
+  (loop [left n] (when (pos? left) (let [s (.skip is left)] (if (pos? s) (recur (- left s)) nil)))))
+
+;; flat-log lines (raw maps) with :tx > from-tx, read from byte `from-byte` forward.
+;; UTF-8 decode (claim values carry unicode — so NOT RandomAccessFile.readLine, which
+;; is ISO-8859-1 and corrupts multibyte). from-byte is a seek hint: too-low only costs
+;; extra parsing, a torn first line is dropped, and the :tx filter is the real boundary.
+(defn- read-log-tail [path from-byte from-tx]
+  (let [f (java.io.File. (str path))]
+    (if-not (and (.exists f) (pos? (.length f)))
+      []
+      (let [len (.length f) start (long (max 0 (min (long (or from-byte 0)) len)))]
+        (with-open [is (java.io.FileInputStream. f)]
+          (skip-fully! is start)
+          (let [rdr (java.io.BufferedReader. (java.io.InputStreamReader. is "UTF-8"))]
+            (loop [acc (transient [])]
+              (let [line (.readLine rdr)]
+                (if (nil? line)
+                  (persistent! acc)
+                  (let [m (try (let [x (edn/read-string line)]
+                                 (when (and (:l x) (:p x) (:r x) (int? (:tx x))
+                                            (> (long (:tx x)) (long from-tx))) x))
+                               (catch Exception _ nil))]
+                    (recur (if m (conj! acc m) acc))))))))))))
+
+(defn- ref-str?* [x] (and (string? x) (ref-shape? x)))
+
+;; keyed-latest over flat lines, mirroring fram.fold/key-of (single -> (l,p); multi ->
+;; (l,p,r)); the latest by :tx wins and its :op is carried so a dominating retract
+;; removes the key. Re-derived here because fram.fold/keyed-latest is private AND drops
+;; retracts (we need them to supersede a snapshot-era claim).
+(defn- tail-keyed-latest [lines]
+  (reduce (fn [m a]
+            (let [k (if (ck/single? (:p a)) [(:l a) (:p a)] [(:l a) (:p a) (:r a)])
+                  prev (get m k)]
+              (if (and prev (>= (long (:tx prev)) (long (:tx a)))) m (assoc m k a))))
+          {} lines))
+
+;; apply a flat-log TAIL (lines past from-tx) onto co's store as per-key group-
+;; reconciled deltas — the O(delta) materialization step shared by boot / reload /
+;; as-of. New predicates are declared (existing cardinality untouched). Then per
+;; keyed-latest key: assert/link (single supersedes the cell via s/assert!/s/link!'s
+;; replace!; multi adds the edge IFF not already live — idempotent), or retract
+;; (mark the matching live claim cnf-superseded). One migrate-style tx; the seq space
+;; is advanced to the tail's max :tx so :version stays == the flat fold version.
+;; Mutates (:store co) in place — callers that need atomicity vs lock-free readers
+;; clone the store first (see maybe-reload!). Returns co.
+(defn- apply-tail! [co lines]
+  (let [st (:store co)
+        valid (filterv #(and (:l %) (:p %) (:r %) (int? (:tx %)) (not (schema-preds (:p %)))) lines)]
+    (when (seq valid)
+      (let [tx (c/begin-tx! st "tail")
+            by-pred (group-by :p valid)
+            memo (atom {})
+            sub! (fn [sid] (or (get @memo sid)
+                               (let [id (or (s/resolve-name st sid)
+                                            (let [e (c/entity! st)] (s/name! st e sid tx) e))]
+                                 (swap! memo assoc sid id) id)))]
+        ;; declare predicates new to the store; keep any existing cardinality claim
+        (doseq [p (keys by-pred)]
+          (when (empty? (c/by-lp st (c/value! st p) (c/value-id st "cardinality")))
+            (s/def-predicate! st p (if (ck/single? p) "single" "multi")
+                                  (if (some ref-str?* (map :r (get by-pred p))) "ref" "literal") tx)))
+        (doseq [[_ a] (tail-keyed-latest valid)]
+          (let [p (:p a) r (:r a) single? (ck/single? p)
+                su (sub! (:l a)) pid (c/value! st p)
+                live (c/by-lp st su pid)]      ; already live-only
+            (if (= "retract" (:op a))
+              (let [sup (c/value! st "cnf-supersedes")
+                    rid (when (ref-str?* r) (s/resolve-name st r))
+                    victims (if single? live
+                                (filter #(let [cr (:r (c/claim-of st %))]
+                                           (if (ref-str?* r) (= rid cr) (= (c/value-id st r) cr))) live))]
+                (doseq [old victims] (c/claim! st old sup old tx)))
+              (let [exists? (some #(let [cr (:r (c/claim-of st %))]
+                                     (if (ref-str?* r) (= (s/resolve-name st r) cr) (= (c/value-id st r) cr))) live)]
+                (when-not (and (not single?) exists?)
+                  (if (ref-str?* r) (s/link! st su p (sub! r) tx) (s/assert! st su p r tx)))))))
+        (let [tmax (reduce max 0 (map :tx valid))]
+          (swap! st assoc :next-seq tmax)
+          (swap! st update :txs assoc tx {:seq tmax :agent "tail"}))))
+    co))
+
+;; live name-triples (store-independent: names + literals, not entity ids) — the
+;; substrate for the reconcile gate, which compares an incrementally-built store to a
+;; from-scratch whole-migrate of the same flat log (they MUST be set-equal).
+(defn- live-name-triples [co] (set (reified->claims co)))
+(defn snapshot-reconcile
+  "Gate: does the live (incrementally-materialized) store equal a from-scratch whole
+   migrate of the flat log? {:ok bool :inc n :fresh n}. Hot-path-free (test/admin)."
+  ([] (snapshot-reconcile @co @flat-log))
+  ([co flat]
+   (let [fresh (migrate-flat->co flat)]
+     {:ok (= (live-name-triples co) (live-name-triples fresh))
+      :inc (count (reified->claims co)) :fresh (count (reified->claims fresh))})))
+
+;; replay the nearest snapshot image, then tail-apply the flat lines past it — the
+;; incremental boot. nil if no usable snapshot (caller falls back to whole migrate).
+(defn- incremental-boot [snap flat]
+  (let [img (java.io.File. (str (:image snap)))]
+    (when (and (.exists img) (pos? (.length img))
+               ;; hash gate: a torn/edited image is rejected (fall back to whole migrate)
+               (or (nil? (:hash snap)) (= (:hash snap) (try (sha256-file (:image snap)) (catch Exception _ nil)))))
+      (let [base {:store (replay (:image snap)) :log nil :lock (Object.)}
+            tail (read-log-tail flat (:byte_offset snap) (:seq snap))]
+        (apply-tail! base tail)
+        {:co base :through (reduce max (long (:seq snap)) (map :tx tail))}))))
+
 (defn boot-flat! [flat]
   (reset! flat-canonical? true)
-  (reset! co (migrate-flat->co flat))
+  (let [snap (read-sidecar flat)
+        ib   (when snap (try (incremental-boot snap flat) (catch Throwable _ nil)))]
+    (if ib
+      (do (reset! co (:co ib)) (reset! built-through (:through ib)))
+      ;; cold path: no snapshot / torn image -> the proven whole-log migrate
+      (let [c0 (migrate-flat->co flat)]
+        (reset! co c0)
+        (reset! built-through (or (:next-seq @(:store c0)) 0)))))
   (seed-name-seq! (:store @co))          ; Build A: seed the serialized name allocator above the global max
   (reset! flat-log flat)
   (reset! flat-mtime (stamp flat))
+  (reset! flat-bytes (.length (java.io.File. (str flat))))
   (reset! cache {:index nil :version -1})
   (reset-refers-state!)                  ; S3.3: derived refers_to belong to the OLD store
   (index!) @co)
 
-;; absorb external edits (capture/import/set append to the flat log out-of-band).
-;; HOT-PATH cost (finding #4): the per-request work is ONLY a cheap (stamp ...)
-;; (one File.lastModified + File.length stat) compared against the last-seen
-;; stamp. The O(n) migrate-flat->co rebuild runs ONLY when that stamp actually
-;; changed — never on an unchanged log — so a stream of pure reads/writes with no
-;; external append pays a stat, not a rebuild. We stat once and reuse it to set
-;; flat-mtime, so a fresh stat is not taken twice per reload. (Reload stays under
-;; dlock by necessity: swapping `co`/`cache` atomically against concurrent
-;; writers is what keeps the live view and the OCC base versions coherent.)
+;; absorb external edits (capture/import append to the flat log out-of-band). The
+;; per-request cost is a (stamp ...) stat; on a change we now TAIL-FOLD only the new
+;; lines (:tx > built-through, read from the last byte length) onto a STRUCTURAL-SHARE
+;; CLONE of the live store — O(delta), not the old O(history) whole re-migrate. The
+;; clone (atom over the immutable store value) is O(1) and keeps the swap atomic, so a
+;; lock-free reader sees the old OR the new store, never a half-applied tail. If the
+;; mtime moved but no new :tx appeared (a compaction/rewrite that renumbered or shrank
+;; the log), we fall back to the whole migrate — correctness floor.
 (defn maybe-reload! []
   (when (and @flat-canonical? @flat-log)
     (let [st (stamp @flat-log)]
       (when (not= st @flat-mtime)
-        (reset! co (migrate-flat->co @flat-log))
+        (let [tail (read-log-tail @flat-log @flat-bytes @built-through)]
+          (if (seq tail)
+            (let [clone {:store (atom @(:store @co)) :log nil :lock (Object.)}]
+              (apply-tail! clone tail)
+              (reset! co clone)
+              (reset! built-through (reduce max (long @built-through) (map :tx tail))))
+            ;; mtime moved but no new tx -> log was rewritten/compacted: whole migrate
+            (let [c0 (migrate-flat->co @flat-log)]
+              (reset! co c0)
+              (reset! built-through (or (:next-seq @(:store c0)) 0)))))
         (reset! flat-mtime st)
+        (reset! flat-bytes (.length (java.io.File. (str @flat-log))))
         (reset! cache {:index nil :version -1})
-        (reset-refers-state!)            ; S3.3: external rebuild discards in-memory refers_to
+        (reset-refers-state!)
         (index!)))))
+
+;; ---- snapshot WRITER: a thin wrapper over dump-log! + @snapshot:<seq> claims ------
+;; dump-log! writes the live store as a v2 image the EXISTING replay consumes (reuse,
+;; not new fold code). covers_through = the live seq at dump time; byte_offset = the
+;; flat-log length at dump time (= tail start). The metadata becomes CLAIMS so "latest
+;; snapshot" / "which covers seq N" / "GC candidates" are queries; a tiny sidecar
+;; mirrors the latest pointer for O(1) boot discovery (claims are the source of truth).
+;; Snapshot is view-relative: of_view @view:main. The @snapshot:<seq> claims land in
+;; the tail (tx > covers_through) and are harmlessly re-applied on the next boot.
+(defn write-snapshot! [co flat]
+  (locking dlock
+    (let [st (:store co)
+          sq (current-seq co)
+          _ (.mkdirs (java.io.File. (snap-dir flat)))
+          image (snap-image flat sq)
+          byteoff (.length (java.io.File. (str flat)))
+          _ (dump-log! st image)
+          h (sha256-file image)
+          ccount (count (c/current-claims st))
+          subj (str "@snapshot:" sq)]
+      (doseq [[p v] [["covers_through" (str sq)] ["byte_offset" (str byteoff)]
+                     ["claim_count" (str ccount)] ["image_path" image]
+                     ["snapshot_hash" h] ["of_view" "@view:main"]]]
+        (do-assert subj p v nil))
+      (write-sidecar! flat {:seq sq :image image :byte_offset byteoff :claim_count ccount :hash h})
+      ;; the snapshot's own @snapshot:<seq> claims were appended inline (do-assert),
+      ;; so the LIVE store already reflects them: advance built-through past them and
+      ;; re-stamp, so a following reload tail-reads only genuinely-new appends.
+      (reset! built-through (current-seq co))
+      (reset! flat-mtime (stamp flat))
+      (reset! flat-bytes (.length (java.io.File. (str flat))))
+      {:ok sq :image image :byte_offset byteoff :claim_count ccount :hash h})))
 
 (defn serve-flat-daemon [port flat]
   (boot-flat! flat)
