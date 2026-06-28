@@ -1732,6 +1732,47 @@
       (reset! flat-bytes (.length (java.io.File. (str flat))))
       {:ok sq :image image :byte_offset byteoff :claim_count ccount :hash h})))
 
+;; ---- as-of: read the graph AS IT STOOD at flat seq N ----------------------------
+;; nearest snapshot with covers_through <= N, then tail-apply the lines in
+;; (covers_through, N] — exactly a full fold truncated at N (same keyed-latest-by-:tx
+;; domination argument, with an UPPER :tx bound). Bounded below by the snapshot floor:
+;; an N below the oldest retained snapshot still works via the whole-migrate fallback
+;; as long as the flat lines survive (compaction must not drop a line below a live
+;; as-of horizon — see the retention sweeper). Admin/debug read, off the hot path.
+(defn- fresh-co []
+  (let [s (c/new-store) tx (c/begin-tx! s "asof-setup")] (s/setup! s tx) {:store s :log nil :lock (Object.)}))
+
+;; @snapshot:<seq> metadata, read off the live store (post-boot the claims ARE the
+;; registry — "which snapshot covers seq N" is a query, decision: snapshots are claims).
+(defn- snapshot-entries [co]
+  (let [st (:store co) cp (c/value-id st "covers_through")]
+    (if-not cp []
+      (vec (for [cid (c/by-p st cp)
+                 :let [subj (:l (c/claim-of st cid))
+                       g (fn [p] (let [v (s/lookup st subj p)] v))]]
+             {:subject (s/name-of st subj)
+              :covers_through (try (parse-long (str (g "covers_through"))) (catch Exception _ nil))
+              :byte_offset    (try (parse-long (str (g "byte_offset"))) (catch Exception _ nil))
+              :image          (g "image_path")
+              :hash           (g "snapshot_hash")})))))
+
+(defn materialize-as-of [flat n]
+  (let [n (long n)
+        cand (->> (snapshot-entries @co)
+                  (filter #(and (:covers_through %) (<= (long (:covers_through %)) n)
+                                (:image %) (.exists (java.io.File. (str (:image %))))))
+                  (sort-by :covers_through))
+        best (last cand)
+        usable? (and best (or (nil? (:hash best))
+                              (= (:hash best) (try (sha256-file (:image best)) (catch Exception _ nil)))))]
+    (if usable?
+      (let [base {:store (replay (:image best)) :log nil :lock (Object.)}
+            tail (filterv #(<= (long (:tx %)) n)
+                          (read-log-tail flat (:byte_offset best) (:covers_through best)))]
+        (apply-tail! base tail))
+      ;; no usable snapshot at/below N -> fold the flat log truncated at :tx <= N
+      (apply-tail! (fresh-co) (filterv #(<= (long (:tx %)) n) (read-log-tail flat 0 -1))))))
+
 (defn serve-flat-daemon [port flat]
   (boot-flat! flat)
   (println (str "reified coordinator (drop-in over flat log): "
