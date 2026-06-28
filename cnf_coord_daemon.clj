@@ -52,7 +52,11 @@
 ;; reference -> binding's stable @mod#int) but for option-1 scope is kept OUT of read projections
 ;; (:query/datalog/warm-cache/tripwire) — render+resolve read it off the store directly. Filtered
 ;; HERE (read view) WITHOUT being a resolve-pred (which would strip it from the store + roll back seq).
-(def read-hidden-preds #{"bound_to"})
+;; withdrawn_* are the first-class retraction SURFACE (thread H): claims-about-a-cid
+;; recording who/when/why a claim was cancelled. Like cnf-supersedes they are bookkeeping
+;; ON cid-subjects, not domain data — filter them from the warm read view / :query / index
+;; (the resolve layer reads them off the store directly via cnf_coord/withdrawal-of).
+(def read-hidden-preds #{"bound_to" "withdrawn_by" "withdrawn_at" "withdrawn_reason"})
 (def refers-version (atom -1))       ; the co version refers_to was last materialized at
 
 ;; ---- S3.3: scoped re-resolve state -----------------------------------------

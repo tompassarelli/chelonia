@@ -132,6 +132,27 @@
             pool    (if (seq in-view) in-view cids)]
         (first (sort-by (fn [cid] [cid (str (get-in @ctx [:txs (get (:tx-of @ctx) cid) :agent]))]) pool))))))
 
+(defn select-causal-1
+  "The CAUSAL read-time election (thread H, Part C) — the resolve-layer twin of the engine's
+   cnf_coord/elect-causal, and the elects_by=causal policy alongside select-main-1's elects_by=cid.
+   Same view-relative pool as select-main-1, but ordered by the CAUSAL key [observed, cid, agent]
+   instead of [cid, agent]: the winner is the member whose writer DECIDED earliest (lowest :observed
+   stamp — the global seq it had seen), tie-broken by commit order then agent. So rival drivers/roles
+   resolve by 'who had the earlier causal view', not 'who committed first' — every reader elects the
+   same with zero coordination. :observed is nil for legacy/non-causal claims, so it falls back to
+   the tx :seq (commit order) and degrades EXACTLY to select-main-1 — a strict refinement, never a
+   regression. Returns nil on an empty group; degrades to (first cids) when no store is bound."
+  [cids]
+  (when (seq cids)
+    (if (nil? ctx)
+      (first cids)
+      (let [in-view (when *view* (view-cids *view* cids))
+            pool    (if (seq in-view) in-view cids)
+            tx-meta (fn [cid] (get-in @ctx [:txs (get (:tx-of @ctx) cid)]))]
+        (first (sort-by (fn [cid] (let [m (tx-meta cid)]
+                                    [(or (:observed m) (:seq m) 0) cid (str (:agent m))]))
+                        pool))))))
+
 (defn pred-val
   "The default-main value of predicate `pname` on node `e`. `pname` may be multi-valued in the
    graph; this SELECTS the main view's one (via select-main-1), it does not assume uniqueness."

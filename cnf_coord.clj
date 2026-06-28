@@ -132,6 +132,42 @@
     (filterv (fn [cid] (let [cl (get (:claims m) cid)] (and (= (:l cl) te) (= (:p cl) pid))))
              all)))
 
+;; --- first-class retraction readers + the add-wins/remove-wins view selector ---
+;; withdrawal-of reads the attribution surface OFF a victim cid (the queryable who/when/
+;; why retract! stamped). nil when the cid carries no live withdrawn_by tombstone.
+(defn- live-r-on [co cid pid]   ; live object-value of one (cid,pid) marker group
+  (let [m @(store co)]
+    (some (fn [c] (when-not (contains? (:superseded m) c) (:r (get (:claims m) c))))
+          (get (:idx-by-lp m) [cid pid]))))
+(defn withdrawal-of [co cid]
+  (let [m  @(store co)
+        wb (c/value-id (store co) "withdrawn_by")]
+    (when (and wb (live-r-on co cid wb))
+      {:by     (get (:values m) (live-r-on co cid wb))
+       :at     (when-let [a (live-r-on co cid (c/value-id (store co) "withdrawn_at"))]     (get (:values m) a))
+       :reason (when-let [r (live-r-on co cid (c/value-id (store co) "withdrawn_reason"))] (get (:values m) r))})))
+(defn withdrawn? [co cid] (boolean (withdrawal-of co cid)))
+
+;; live-members — the multi-valued live group on (te,pid) UNDER A WITHDRAWAL POLICY. The
+;; policy is a VIEW choice (thread H, Part D), not a kernel hardcode:
+;;   :remove-wins (DEFAULT) — withdrawn members drop. Byte-identical to live-cids-lp (the
+;;     cnf-supersedes marker already excludes them); this is what every existing reader sees.
+;;   :add-wins — a member superseded ONLY by a WITHDRAWAL (carries a withdrawn_by tombstone)
+;;     RESURRECTS; a genuine OVERWRITE (superseded with no withdrawal tag) still wins. So an
+;;     add-wins view re-sees a cancellation while remove-wins hides it — same log, two views.
+;; The discriminator is `withdrawn?` (overwrite victims have no tombstone), so the two
+;; policies are pure read-time derivations over the one append-only log.
+(defn live-members
+  ([co te pid] (live-members co te pid :remove-wins))
+  ([co te pid policy]
+   (let [m    @(store co)
+         live (live-cids-lp co te pid)]
+     (if (= policy :add-wins)
+       (let [resurrected (filter (fn [cid] (and (contains? (:superseded m) cid) (withdrawn? co cid)))
+                                 (get (:idx-by-lp m) [te pid]))]
+         (vec (distinct (concat live resurrected))))
+       (vec live)))))
+
 ;; --- views-as-claims (thread E): per-branch isolation over the same log ------
 ;; A VIEW is a first-class subject; (view selects @cid) claims are its OVERLAY —
 ;; the cids it treats as facts. The object IS a claim id: cids live in the same
@@ -329,9 +365,21 @@
 
 ;; retract: single-valued clears (te,pred); multi-valued removes the (te,pred,r)
 ;; edge. Same lock + base_version contract as commit! — clearing a driver out
-;; from under an active thread races safely. Supersession is append-only (a
-;; cnf-supersedes claim marks each victim), so retract is itself reversible.
-(defn retract! [co agent te-name pred r-spec base]
+;; from under an active thread races safely.
+;;
+;; FIRST-CLASS RETRACTION (thread H, Part D): cancellation is now an ATTRIBUTABLE,
+;; QUERYABLE claim-ABOUT-the-victim-cid — (@cid withdrawn_by <agent>), (@cid
+;; withdrawn_at <seq>), (@cid withdrawn_reason "<why>") — emitted ALONGSIDE (not
+;; instead of) the anonymous cnf-supersedes marker. The supersedes marker stays the
+;; internal live-fold mechanism (it drives live-cids-lp == remove-wins, the default);
+;; the withdrawn_* claims are the cancellation SURFACE: who/when/why, queryable, and
+;; the discriminator that lets an ADD-WINS view resurrect a withdrawal (live-members)
+;; while a genuine overwrite still wins. `reason` is optional (older 6-arg callers
+;; keep working). cids are first-class subjects (same flat id-space — VIEWS §8), so a
+;; claim-about-a-cid is just a claim.
+(defn retract!
+  ([co agent te-name pred r-spec base] (retract! co agent te-name pred r-spec base nil))
+  ([co agent te-name pred r-spec base reason]
   (locking (:lock co)
     (let [pid    (c/value-id (store co) pred)
           te0    (s/resolve-name (store co) te-name)
@@ -352,12 +400,22 @@
                 {:ok (current-seq co)}
                 (let [since (:next-id @(store co))
                       observed (let [pre (current-seq co)] (min (or base pre) pre))  ; causal stamp on the retract tx
-                      tx (c/begin-tx! (store co) agent)
-                      _  (swap! (store co) assoc-in [:txs tx :observed] observed)
-                      sup (c/value! (store co) "cnf-supersedes")]
-                  (doseq [old victims] (c/claim! (store co) old sup old tx))
+                      tx  (c/begin-tx! (store co) agent)
+                      _   (swap! (store co) assoc-in [:txs tx :observed] observed)
+                      sup (c/value! (store co) "cnf-supersedes")
+                      wbp (c/value! (store co) "withdrawn_by")
+                      wap (c/value! (store co) "withdrawn_at")
+                      wrp (c/value! (store co) "withdrawn_reason")
+                      ag  (c/value! (store co) (str agent))
+                      atv (c/value! (store co) (str (get-in @(store co) [:txs tx :seq])))
+                      rsv (when reason (c/value! (store co) (str reason)))]
+                  (doseq [old victims]
+                    (c/claim! (store co) old sup old tx)             ; internal live-fold mechanism (remove-wins)
+                    (c/claim! (store co) old wbp ag tx)              ; cancellation SURFACE: who
+                    (c/claim! (store co) old wap atv tx)             ;   when (the retract tx seq)
+                    (when rsv (c/claim! (store co) old wrp rsv tx))) ;   why (optional)
                   (append-tx! co (delta-records co since tx))
-                  {:ok (get-in @(store co) [:txs tx :seq])})))))))))
+                  {:ok (get-in @(store co) [:txs tx :seq])}))))))))))
 
 ;; --- exclusive lease (mutual exclusion + fencing) — ADDITIVE -----------------
 ;; Closes the lost-update-vs-mutex gap: commit!'s base_version rejects a STALE

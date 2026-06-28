@@ -97,6 +97,52 @@
   (chk "(b) as-of is bounded: live-as-of folds the in-store tail, returns a set"
        (set? (live-as-of co s2))))
 
+;; ============================================================================
+;; (c) first-class retraction — a withdrawn MULTI member drops under remove-wins
+;;     and RESURRECTS under an add-wins view; the tombstone is attributable.
+;; ============================================================================
+(let [log "/tmp/cnf-causality-c.log"
+      co  (new-coord log)
+      pid (fn [] (c/value-id (store co) "done_worker"))
+      tid (fn [] (s/resolve-name (store co) "@barrier"))
+      ;; "done_worker" is undeclared -> MULTI: a K-of-N quorum family (the design's proof
+      ;; that retraction works on the completion/quorum dual, not just election).
+      _   (commit! co "w" "@barrier" "done_worker" :assert "wA" nil)
+      _   (commit! co "w" "@barrier" "done_worker" :assert "wB" nil)
+      _   (commit! co "w" "@barrier" "done_worker" :assert "wC" nil)
+      before (count (live-members co (tid) (pid)))
+      ;; agentX WITHDRAWS wB with attribution (a "done-undo")
+      rw  (retract! co "agentX" "@barrier" "done_worker" "wB" nil "mis-reported")
+      ;; the withdrawn victim cid (it is now superseded but carries a tombstone)
+      victim (first (filter #(withdrawn? co %)
+                            (get (:idx-by-lp @(store co)) [(tid) (pid)])))
+      remove-live (mapv #(c/literal (store co) (:r (c/claim-of (store co) %)))
+                        (live-members co (tid) (pid) :remove-wins))
+      add-live    (sort (mapv #(c/literal (store co) (:r (c/claim-of (store co) %)))
+                              (live-members co (tid) (pid) :add-wins)))
+      wd  (withdrawal-of co victim)]
+  (chk "(c) 3 members live before the withdrawal" (= 3 before))
+  (chk "(c) the retract committed" (:ok rw))
+  (chk "(c) remove-wins (DEFAULT): the withdrawn member wB DROPS"
+       (= ["wA" "wC"] (sort remove-live)))
+  (chk "(c) remove-wins count is now K-1 (the barrier dual feels the un-vote)"
+       (= 2 (count remove-live)))
+  (chk "(c) add-wins VIEW: wB RESURRECTS (same log, policy is view-relative)"
+       (= ["wA" "wB" "wC"] add-live))
+  (chk "(c) the withdrawal is ATTRIBUTABLE — who" (= "agentX" (:by wd)))
+  (chk "(c) the withdrawal is ATTRIBUTABLE — why" (= "mis-reported" (:reason wd)))
+  (chk "(c) the withdrawal records WHEN (a seq stamp)" (some? (:at wd)))
+  ;; a GENUINE overwrite (single-valued LWW) must NOT resurrect under add-wins —
+  ;; only withdrawals carry the tombstone that add-wins keys on.
+  (let [_  (register-pred! co "phase" "single" "literal")
+        r1 (commit! co "w" "@barrier" "phase" :assert "one" 0)
+        _  (commit! co "w" "@barrier" "phase" :assert "two" (:ok r1))   ; overwrites "one" (no withdrawal)
+        ppid (c/value-id (store co) "phase")
+        addp (mapv #(c/literal (store co) (:r (c/claim-of (store co) %)))
+                   (live-members co (tid) ppid :add-wins))]
+    (chk "(c) add-wins does NOT resurrect a genuine overwrite (no tombstone)"
+         (= ["two"] addp))))
+
 ;; ---- summary ---------------------------------------------------------------
 (let [cs @checks fails (remove second cs)]
   (doseq [[nm ok] cs] (println (if ok "  [PASS] " "  [FAIL] ") nm))
