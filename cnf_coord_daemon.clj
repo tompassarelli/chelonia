@@ -373,7 +373,10 @@
 ;; client re-scopes live on role/watch updates).
 (defn- sub-match? [flt {:keys [l p r]}]
   (or (nil? flt)
-      (and (= p "to") (contains? (:addrs flt) r))
+      ;; a MESSAGE (send -> p"to") OR a peer-COMMAND envelope (send-cmd -> p"target")
+      ;; addressed to one of my addrs. "target" lands last in the envelope, so matching
+      ;; it is the trigger; the reactor then reads the full @cmd:<id>. (v1 debt 019f1184-e244)
+      (and (#{"to" "target"} p) (contains? (:addrs flt) r))
       (contains? (:watch flt) l)
       (= l (:node flt))))
 
