@@ -1805,10 +1805,20 @@
               (apply-tail! clone tail)
               (reset! co clone)
               (reset! built-through (reduce max (long @built-through) (map :tx tail))))
-            ;; mtime moved but no new tx -> log was rewritten/compacted: whole migrate
-            (let [c0 (migrate-flat->co @flat-log)]
-              (reset! co c0)
-              (reset! built-through (or (:next-seq @(:store c0)) 0)))))
+            ;; mtime moved, no new tx from the live offset. A legit compaction keeps the
+            ;; head (log max-tx >= built-through); a REGRESSION (revert/truncation — e.g.
+            ;; a `git checkout` of the tracked claims.log) drops it BELOW our live state.
+            ;; NEVER silently adopt a log that lost our claims.
+            (let [logmax (reduce max -1 (map :tx (read-log-tail @flat-log 0 -1)))]
+              (if (< logmax (long @built-through))
+                (binding [*out* *err*]
+                  (println (str "[fram] REFUSED reload: claims.log regressed (max-tx "
+                                logmax " < live built-through " @built-through ") — a"
+                                " revert/truncation, NOT an append. Kept the in-memory"
+                                " state; the log file is STALE — restore before restart.")))
+                (let [c0 (migrate-flat->co @flat-log)]
+                  (reset! co c0)
+                  (reset! built-through (or (:next-seq @(:store c0)) 0)))))))
         (reset! flat-mtime st)
         (reset! flat-bytes (.length (java.io.File. (str @flat-log))))
         (reset! cache {:index nil :version -1})

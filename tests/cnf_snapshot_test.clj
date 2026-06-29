@@ -74,6 +74,17 @@
     (chk "post-compaction: @T2 (head-only subject) survived (from image)"
          (some? (s/resolve-name st "@T2"))))
 
+  ;; --- (F) REGRESSION GUARD (thread 019f1184-d851): a log reverted/truncated BELOW the
+  ;; live state must be REFUSED, not silently adopted (the git-checkout data-loss vector). ---
+  (boot-flat! LOG)                                   ; fresh good boot (image + tail)
+  (let [before (live-name-triples @co)
+        bt     (long @built-through)]
+    (write-lines! LOG [(ln 1 "assert" "@T1" "title" "First")])   ; revert to an ancient 1-line log
+    (.setLastModified (java.io.File. LOG) (+ 1000000 (.lastModified (java.io.File. LOG))))
+    (maybe-reload!)                                  ; must REFUSE: log max-tx=1 << built-through
+    (chk "regression: reverted log REFUSED — live state preserved" (= before (live-name-triples @co)))
+    (chk "regression: built-through NOT rolled back" (= bt (long @built-through))))
+
   ;; --- report ---
   (let [cs @checks fails (remove second cs)]
     (println "\n=== snapshot / tail-fold / incremental boot (thread 019f100f-7fff) ===")
