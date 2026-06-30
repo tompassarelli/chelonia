@@ -2,7 +2,7 @@
 ;; cnf_edit_min_smoke.clj — Build A smoke: the MINIMAL-OP authoring edit.
 ;; ============================================================================
 ;; Boots ONE warm code daemon over a /tmp COPY of .fram/code.log on a verified-free
-;; high port (NEVER 7977 / lodestar), then drives a 1-line set-body THROUGH the
+;; high port (NEVER 7977 / tern), then drives a 1-line set-body THROUGH the
 ;; daemon's NEW :edit-min wire op and reports HOW MANY claim ops it committed.
 ;;
 ;; GATE 1 (OPCOUNT): a 1-line set-body must commit a HANDFUL of ops (contrast: the

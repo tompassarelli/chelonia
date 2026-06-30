@@ -13,7 +13,7 @@
 ;;       warm-cache — option-1 scope: render+resolve read it off the store directly).
 ;;
 ;; SAFE: a /tmp COPY of .fram/code.log + in-process daemon (boot-flat!, handle{});
-;; NO socket, NEVER port 7977, NEVER the canonical lodestar log.
+;; NO socket, NEVER port 7977, NEVER the canonical tern log.
 ;; ============================================================================
 (require '[clojure.java.io :as io] '[clojure.string :as str]
          '[fram.cnf :as c] '[fram.fold :as fold] '[fram.query :as q] '[fram.rt])

@@ -199,7 +199,7 @@ cheapest first:
 2. **Root + reachability** — a view = a root claim plus its coherent closure. Matches "a program is
    a traversal under a view"; reuses the renderer's existing reachability filter.
 3. **View-as-claim** — `(view selects @claim)` triples; views become first-class subjects in the
-   same graph (the exact pattern lodestar threads/topics/`@ui` already use). Most CNF-native — no
+   same graph (the exact pattern tern threads/topics/`@ui` already use). Most CNF-native — no
    new atom, consistent with `WHY_FRAM_EXISTS` ("a view is just more claims about which claims count").
 
 **The read-side take-firsts (§6) are the attach points.** Each `(first …)` becomes

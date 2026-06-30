@@ -5,7 +5,7 @@
 ;; edits through :edit-min, reporting each edit's wall-clock. The FIRST edit pays a
 ;; one-time cold whole-corpus refers_to materialize (ensure-refers! cold); every
 ;; STEADY-STATE edit pays only a SCOPED re-resolve of the dirty module — that is
-;; the Build B number. NEVER 7977 / lodestar.
+;; the Build B number. NEVER 7977 / tern.
 ;;   bb -cp out cnf_edit_min_speed.clj
 ;; ============================================================================
 (require '[fram.cnf :as c] '[fram.schema :as s]

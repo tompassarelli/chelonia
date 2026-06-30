@@ -12,7 +12,7 @@
 ;; RTT (negligible); the propagation cost lives in the handler logic.
 ;;
 ;; SAFETY: operates ONLY on a /tmp COPY of the corpus. Never binds a port, never
-;; port 7977, never the canonical lodestar log, never mutates the original
+;; port 7977, never the canonical tern log, never mutates the original
 ;; .fram/code.log. The daemon's tail command-dispatch no-ops (no command-line arg).
 ;; ============================================================================
 (require '[clojure.java.io :as io] '[clojure.string :as str])

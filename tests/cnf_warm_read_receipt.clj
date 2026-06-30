@@ -8,7 +8,7 @@
 ;; (coord-query to a down/old daemon -> nil -> cold fallback).
 ;;
 ;; SAFE: synthetic /tmp log + in-process daemon (boot-flat!, handle{}); no socket, no
-;; port 7977, never the canonical lodestar log. The one socket call is to a DEAD port
+;; port 7977, never the canonical tern log. The one socket call is to a DEAD port
 ;; (fallback probe) -> connection refused -> nil.
 ;; ============================================================================
 (require '[clojure.java.io :as io] '[clojure.string :as str]

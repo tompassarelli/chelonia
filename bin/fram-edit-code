@@ -44,7 +44,7 @@
 ;;                  and stop — do NOT commit (used as the recompile-gate pre-step).
 ;;
 ;; SAFETY: --port must serve a *code.log (fram-commit-code asserts this). NEVER
-;; the live lodestar coordinator. NO src/fram/*.bclj is read on this path.
+;; the live tern coordinator. NO src/fram/*.bclj is read on this path.
 ;; Env: BEAGLE_HOME, FRAM_ROUNDTRIP, FRAM_RESOLVE, FRAM_BIN, FRAM_OUT.
 ;; ============================================================================
 (require '[clojure.string :as str]
@@ -176,7 +176,7 @@
                  "reorder"     (do (when (str/blank? name) (die "reorder needs --name <def> [--after <anchor>]"))
                                    {:op "reorder" :module module :name name :after after})
                  (die "unknown op:" op "(rename | set-body | upsert-form | insert-form | insert-comment | delete | reorder)"))]
-      ;; SAFETY GATE: refuse unless the daemon serves a CODE log (never lodestar).
+      ;; SAFETY GATE: refuse unless the daemon serves a CODE log (never tern).
       (let [st (coord-rt port {:op :status}) daemon-log (str (:log st))]
         (when (str/blank? daemon-log) (die "coordinator on" port "reports no :log — refusing"))
         (when-not (str/includes? daemon-log "code.log")

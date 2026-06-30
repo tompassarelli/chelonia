@@ -53,7 +53,7 @@ time. This is a clear win, short only of an optimistic 0.50 target bar.
 
 **Question:** rank every defn by **blast radius** — how many functions
 transitively depend on it. A flat one-hop caller list cannot compute this; a
-graph closure does in one fixpoint. (This is Lodestar's `leverage`, for code.)
+graph closure does in one fixpoint. (This is Tern's `leverage`, for code.)
 
 | metric | value | kill line | result |
 |---|---|---|---|

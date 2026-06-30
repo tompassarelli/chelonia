@@ -14,7 +14,7 @@
 # the harness is cramped and the other results are artifacts (the #11b bug).
 #
 # SAFE: operates ONLY in a fresh /tmp repo. Never the fram repo, never a real
-# remote, never port 7977 / the canonical lodestar log.
+# remote, never port 7977 / the canonical tern log.
 # ============================================================================
 set -u
 WORK="$(mktemp -d /tmp/git-append-baseline.XXXXXX)"

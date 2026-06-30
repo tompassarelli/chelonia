@@ -30,7 +30,7 @@
 ;;   --pace    seconds between verbs (default 1.5) so the graph moves legibly.
 ;;
 ;; SAFETY: the port must serve a *code.log (fram-edit-code's :edit-min gate asserts
-;; this; we pre-check for a clear early error). NEVER the lodestar coordinator.
+;; this; we pre-check for a clear early error). NEVER the tern coordinator.
 ;; ============================================================================
 (require '[clojure.string :as str]
          '[clojure.java.io :as io]

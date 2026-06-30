@@ -33,7 +33,7 @@
 ;;     --dry-run print the delta (#adds / #removes) and commit NOTHING.
 ;;
 ;; SAFETY: the caller MUST point --port at a coordinator booted on the CODE log
-;; (.fram/code.log) — NEVER the live lodestar coordinator. This script asserts the
+;; (.fram/code.log) — NEVER the live tern coordinator. This script asserts the
 ;; coordinator's :status :log basename is a code log before committing.
 ;;
 ;; Env: BEAGLE_HOME, FRAM_ROUNDTRIP.
@@ -152,7 +152,7 @@
     (when (str/blank? logp) (die "coordinator on" port "reports no :log — refusing to commit"))
     (when-not (str/includes? logp "code.log")
       (die "SAFETY: coordinator on" port "serves" logp
-           "— NOT a *code.log; refusing (never commit code to a thread/lodestar log)"))
+           "— NOT a *code.log; refusing (never commit code to a thread/tern log)"))
     (log! "fram-commit-code: target coordinator" (str "127.0.0.1:" port) "log=" logp))
 
   (let [post (bclj->triples module bclj)

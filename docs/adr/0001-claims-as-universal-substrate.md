@@ -25,12 +25,12 @@ never the source of truth.
 | Domain | Claims customer | Status |
 |---|---|---|
 | Code | **chartroom** (beagle source → claims; rename/delete/who-calls/blast) | shipped, folded into fram |
-| Work / thought | **lodestar** (threads/clock as claims) | shipped, in daily use |
+| Work / thought | **tern** (threads/clock as claims) | shipped, in daily use |
 | **Apps** | **eddy** (app data/logic/structure as claims) | **target state — the open build** |
 
 ### 2. The four projects (and the one module)
 `fram` (engine + the `chartroom` module), `beagle` (language/compiler), `eddy`
-(app compiler), `lodestar` (work substrate). **chartroom is a module inside fram**
+(app compiler), `tern` (work substrate). **chartroom is a module inside fram**
 (`fram/chartroom`, "beagle source code-intelligence"), folded 2026-06-18 — licensed
 by lockstep cadence + cross-repo friction relief, *not* dependency-direction. The
 seam is enforced structurally: `core_code_blind_test` (fram-core stays blind to
@@ -65,11 +65,11 @@ orthogonal to those two.
   only for recursive/relational derivation (leverage/reaches); it is net-negative
   for flat filters (measured: `leverage_probe`, ~2.3× more code + a rotting predicate
   schema). ready/blocked-as-Datalog is a **decided non-goal**.
-- The lodestar **leverage retrofit is parked** — adopt it only as part of a wholesale
-  move of lodestar's projection layer onto the reified store, never standalone.
+- The tern **leverage retrofit is parked** — adopt it only as part of a wholesale
+  move of tern's projection layer onto the reified store, never standalone.
 
 ## Next move
 **eddy-on-claims**, greenfield: back the smallest eddy demo with a fram claim store
 instead of SQL. Falsifiable question: is it less ceremony than eddy-on-SQL, and does
-reasoning (blast/Datalog over live app data) fall out for free? No lodestar bridge,
+reasoning (blast/Datalog over live app data) fall out for free? No tern bridge,
 no new API — greenfield removes the preconditions.

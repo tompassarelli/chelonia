@@ -21,7 +21,7 @@
 ;;   (3) regression: a `set-body` through the SAME chain still commits.
 ;;
 ;; SAFE: isolated daemon on a /tmp copy named "*code.log"; never 7977 / the canonical
-;; lodestar log. The source code log is COPIED, never mutated.
+;; tern log. The source code log is COPIED, never mutated.
 ;; ============================================================================
 (require '[clojure.java.io :as io]
          '[clojure.string :as str]

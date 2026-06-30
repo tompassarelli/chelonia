@@ -125,7 +125,7 @@
      ""
      "  ;; 5. STRATIFIED NEGATION (ready/blocked-style derivation): d/nlit + d/run-strata"
      "  ;;    [[stratum0 positive rules] [stratum1 rules with (d/nlit ...)] ...]"
-     "  ;;    (d/strata-violations strata) must be empty.  ground truth: lodestar/cnf_lifecycle_test.clj"]))
+     "  ;;    (d/strata-violations strata) must be empty.  ground truth: tern/cnf_lifecycle_test.clj"]))
   (println "\n## Reasoning/repair over BEAGLE CODE (the chartroom module — now inside fram)")
   (println (str/join "\n"
     ["  ;; chartroom folded into fram (ADR 0001). Rent its resolver from $FRAM/chartroom:"

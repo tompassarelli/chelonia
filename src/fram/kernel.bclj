@@ -11,10 +11,10 @@
 ;; Lifecycle is NOT a stored enum — it's derived from these structural claims:
 ;; commitment (`committed`), completion (`outcome`), withdrawal (`abandoned`),
 ;; activity (`driver`/clock, derived), blocked (`depends_on`, derived).
-;; Cardinality vocab is INJECTED by the app (lodestar exports FRAM_SINGLE_VALUED,
+;; Cardinality vocab is INJECTED by the app (tern exports FRAM_SINGLE_VALUED,
 ;; space-separated) — the engine hard-codes NO domain vocab of its own. The literal
 ;; below is a TRANSITIONAL fallback for back-compat (tests / un-wrapped invocation);
-;; it goes away once every caller sets the env. (§1.1, fram/lodestar un-tangle.)
+;; it goes away once every caller sets the env. (§1.1, fram/tern un-tangle.)
 (def single-valued :- (Vec String)
   (let [env :- Any (System/getenv "FRAM_SINGLE_VALUED")]
     (if (and (some? env) (not (= env "")))
@@ -27,9 +27,9 @@
 ;; LIFECYCLE vocab, env-injected (mirrors single-valued — the consumer declares it):
 ;; "terminal" = resolved (done/canceled); "withdrawn" = a depends_on target that's
 ;; suspect to depend on. The lifecycle DERIVATION (terminal?/terminal-i?) moved to
-;; lodestar.projections; the kernel keeps only this vocab, for the two engine-side
+;; tern.projections; the kernel keeps only this vocab, for the two engine-side
 ;; consumers that still read it: the coordinator's the-model §9 terminal-cascade
-;; (cnf_coord_daemon) and the doctor vocab-fingerprint. Defaults are the lodestar
+;; (cnf_coord_daemon) and the doctor vocab-fingerprint. Defaults are the tern
 ;; lifecycle vocab; a consumer overrides via the env vars.
 (def terminal-preds :- (Vec String)
   (let [env :- Any (System/getenv "FRAM_TERMINAL_PREDS")]
@@ -126,7 +126,7 @@
   (mapv (fn [c :- Claim] :- String (:r c)) (q-lp claims l p)))
 
 ;; NOTE: lifecycle DERIVATION (`terminal?`/`terminal-i?` and their `any-of?`
-;; helpers) moved OUT to lodestar.projections — deriving "resolved" from
+;; helpers) moved OUT to tern.projections — deriving "resolved" from
 ;; outcome/abandoned is WORK semantics, not a structural engine concern. The
 ;; engine stores the lifecycle claims and keeps the `terminal-preds`/
 ;; `withdrawn-preds` vocab (the coordinator's the-model §9 terminal-cascade and
@@ -191,7 +191,7 @@
 
 ;; GENERIC structural integrity only (cycles + dangling refs). The WORK rules
 ;; (depends_on→abandoned, and lead/driver/proposed_by must be a display_name
-;; person) moved to lodestar.validate — the engine knows no lifecycle or
+;; person) moved to tern.validate — the engine knows no lifecycle or
 ;; person/role vocab.
 (defn violations [claims :- (Vec Claim) te :- String] :- (Vec String)
   (let [ids (thread-ids claims)
@@ -258,12 +258,12 @@
   (filterv (fn [s :- String] :- Bool (some? (one-i idx s "title"))) (:subjects idx)))
 
 ;; NOTE: `anchor-i?` / `work-thread-ids-i` (the WORK-thread set — anchors excluded)
-;; moved OUT to lodestar.projections. They are WORK semantics (which titled nodes
+;; moved OUT to tern.projections. They are WORK semantics (which titled nodes
 ;; are actionable work vs grouping anchors), not a structural engine concern, and
 ;; had zero fram callers. The engine keeps only the structural `thread-ids-i`.
 
 ;; `terminal-i?` / `any-of-i?` (indexed lifecycle derivation) also moved to
-;; lodestar.projections — see the flat `terminal?` note above.
+;; tern.projections — see the flat `terminal?` note above.
 
 (defn dependents-i [idx :- Index te :- String] :- (Vec String)
   (get (:revdep idx) te []))
@@ -282,7 +282,7 @@
 
 ;; GENERIC structural integrity only (cycles + dangling refs), mirroring the flat
 ;; `violations`. The WORK rules (depends_on→abandoned, person/role refs) moved to
-;; lodestar.validate/work-violations-i.
+;; tern.validate/work-violations-i.
 (defn violations-i [idx :- Index te :- String] :- (Vec String)
   (let [v2 (reduce
             (fn [acc :- (Vec String) d :- String] :- (Vec String)

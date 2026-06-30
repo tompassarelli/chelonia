@@ -19,9 +19,9 @@ fail=0
 note() { printf '  %s\n' "$*"; }
 bad()  { printf 'FAIL: %s\n' "$*"; fail=1; }
 
-# (1) stale repo URLs — wrong org/repo forms. (tompassarelli/lodestar is CORRECT; not listed.)
+# (1) stale repo URLs — wrong org/repo forms. (tompassarelli/tern is CORRECT; not listed.)
 echo "== (1) repo URLs =="
-BANNED='tompassarelli/(fram|beagle|eddy|chartroom)|Autonymy/(lodestar|eddy|chartroom)'
+BANNED='tompassarelli/(fram|beagle|eddy|chartroom)|Autonymy/(tern|eddy|chartroom)'
 if hits=$(grep -rnE "$BANNED" "$README" .github 2>/dev/null); then
   bad "stale/wrong repo URL(s):"; printf '%s\n' "$hits" | sed 's/^/    /'
 else note "ok — no stale org/repo forms"; fi

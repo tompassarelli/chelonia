@@ -314,7 +314,7 @@
           (recur)))))
   nil)
 
-;; --- time module runtime (ported from los.rt for `lodestar clock`) -----------
+;; --- time module runtime (ported from los.rt for `tern clock`) -----------
 
 (defn error-exit [msg]
   (binding [*out* *err*] (println (str "error: " msg)))

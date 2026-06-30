@@ -3,7 +3,7 @@
 # personal website" threads (no personal data). Shows what the ENGINE does:
 # fold Markdown into a claim graph, inspect it, check structural integrity, and
 # regenerate the Markdown claim-identically. The life verbs you'd actually live
-# in (ready / blocked / leverage / next) belong to a consumer like Lodestar,
+# in (ready / blocked / leverage / next) belong to a consumer like Tern,
 # which derives them from this same graph — they are not part of the engine.
 #
 # Record a cast:  asciinema rec -c ./demo.sh demo.cast  &&  agg demo.cast demo.gif
@@ -30,4 +30,4 @@ a=$("$HERE/bin/fram" import | grep -oE '[0-9]+ claims')
 b=$(FRAM_THREADS="$WORK/regen" "$HERE/bin/fram" import | grep -oE '[0-9]+ claims')
 printf '\033[2m# round-trip: %s in, %s back from the regenerated files — claim-identical (roundtrip_test.clj)\033[0m\n' "$a" "$b"
 
-printf '\n\033[2m# On top of this graph, a consumer (e.g. Lodestar) derives ready / blocked /\n# leverage / next. Those are domain projections, not engine commands.\033[0m\n'
+printf '\n\033[2m# On top of this graph, a consumer (e.g. Tern) derives ready / blocked /\n# leverage / next. Those are domain projections, not engine commands.\033[0m\n'

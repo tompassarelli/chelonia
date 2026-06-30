@@ -2,7 +2,7 @@
 (ns fram.main
   "Engine CLI: generic claim operations over the log — import/export, show, set,
   merge, tell/untell (coordinator write), validate, watch. The life domain
-  (lifecycle projections, clock, capture conventions) lives in Lodestar."
+  (lifecycle projections, clock, capture conventions) lives in Tern."
   (:gen-class))
 
 (require fram.kernel :as k)

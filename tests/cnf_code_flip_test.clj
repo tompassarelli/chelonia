@@ -5,7 +5,7 @@
 ;; Drives the KEYSTONE + gates 3/4/5 over a THROWAWAY daemon booted on a /tmp COPY
 ;; of .fram/code.log (the canonical CODE log), with trap-kill and a :status sanity
 ;; assertion (the daemon's :log MUST be our code-log copy before any result is
-;; trusted). NEVER touches port 7977 or the lodestar log.
+;; trusted). NEVER touches port 7977 or the tern log.
 ;;
 ;; PROVES (the flip thesis: the .bclj is a pure function of the CODE claim log):
 ;;   K  KEYSTONE  render(log) == render(text-path) BYTE-IDENTICAL (the documented
@@ -81,7 +81,7 @@
 ;;     code-log copy (mirrors graph_arm.sh STATUS_OK). Falsifies "wrong log".
 (def status (client port {:op :status}))
 (def status-ok (and (= flat (str (:log status))) (pos? (:claims status))))
-(chk "SANITY: daemon :status :log == our /tmp code-log copy (not 7977/lodestar)" status-ok)
+(chk "SANITY: daemon :status :log == our /tmp code-log copy (not 7977/tern)" status-ok)
 (when-not status-ok
   (println "  ABORT: daemon serves" (pr-str (:log status)) "expected" flat) (shutdown!) (System/exit 1))
 

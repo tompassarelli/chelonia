@@ -1,7 +1,7 @@
 ;; cnf_occ_verbs_test.clj — the move-C gate: per-(s,p) cardinality-typed write verbs
 ;; over a base-OPTIONAL commit!. The client global-version CAS ritual is gone; the
 ;; engine now splits writes by cardinality, exercised here straight against commit!
-;; (the wire verbs append!/put!/swap! in lodestar.coord are thin shells over these
+;; (the wire verbs append!/put!/swap! in tern.coord are thin shells over these
 ;; same commit! calls — append!/put! pass NO base, swap! passes one):
 ;;
 ;;   (a) append! — MULTI pred, NO base: never rejected; two concurrent DISJOINT

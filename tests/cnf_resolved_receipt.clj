@@ -8,7 +8,7 @@
 ;; answer. Rep-stable (pure read over the (l,p) live group, no fN).
 ;;
 ;; SAFE: fresh in-process coordinator on a /tmp scratch log; no socket, no port 7977,
-;; never the canonical lodestar log.
+;; never the canonical tern log.
 ;; ============================================================================
 (require '[fram.cnf :as c] '[fram.schema :as s] '[clojure.string :as str])
 (load-file "cnf_coord_daemon.clj")

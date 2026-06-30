@@ -48,7 +48,7 @@
 
 ;; ============================================================================
 ;; FRAM ARM — real commit!/retract! OCC wire on an ISOLATED temp coordinator.
-;; (NEVER the canonical lodestar log — a fresh new-coord on a /tmp path.)
+;; (NEVER the canonical tern log — a fresh new-coord on a /tmp path.)
 ;; ============================================================================
 (defn fresh-coord []
   (let [log (str "/tmp/cnf-11b-" (System/nanoTime) ".log")
