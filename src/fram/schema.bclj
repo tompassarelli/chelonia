@@ -1,4 +1,4 @@
-(define-target clj)
+#lang beagle/clj
 
 ;; @claim-canonical — source of truth is the Fram claim graph, not this text.
 ;; This .bclj is a regenerated, recompile-gated downstream VIEW (move-3 flip).
