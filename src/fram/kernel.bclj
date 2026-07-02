@@ -132,10 +132,17 @@
 ;; `withdrawn-preds` vocab (the coordinator's the-model §9 terminal-cascade and
 ;; the doctor vocab-fingerprint still read it), but no longer DERIVES from it.
 
+;; Order-preserving dedupe with map-backed membership. The vec-contains? scan
+;; was O(n²) — ~24e9 comparisons on a 531k-claim code log = the 14-minute cold
+;; boot (thread 019f20c0-5816).
 (defn- uniq [xs :- (Vec String)] :- (Vec String)
-  (reduce (fn [acc :- (Vec String) x :- String] :- (Vec String)
-            (if (vec-contains? acc x) acc (conj acc x)))
-          [] xs))
+  (loop [r xs seen {} acc []]
+    (if (empty? r)
+      acc
+      (let [x (first r)]
+        (if (some? (get seen x))
+          (recur (rest r) seen acc)
+          (recur (rest r) (assoc seen x true) (conj acc x)))))))
 
 ;; a thread is structural: an entity (@id subject) that has a `title`.
 (defn thread-ids [claims :- (Vec Claim)] :- (Vec String)

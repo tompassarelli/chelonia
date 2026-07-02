@@ -52,7 +52,11 @@
   (mapv (fn [c] (:r c)) (q-lp claims l p)))
 
 (defn- uniq [xs]
-  (reduce (fn [acc x] (if (vec-contains? acc x) acc (conj acc x))) [] xs))
+  (loop [r xs
+   seen {}
+   acc []]
+  (if (empty? r) acc (let [x (first r)]
+  (if (some? (get seen x)) (recur (rest r) seen acc) (recur (rest r) (assoc seen x true) (conj acc x)))))))
 
 (defn thread-ids [claims]
   (filterv (fn [s] (some? (one claims s "title"))) (uniq (mapv (fn [c] (:l c)) claims))))
