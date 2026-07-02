@@ -930,7 +930,12 @@
     e))
 (defn mint-datum! [src d]
   (cond
-    (nil? d)        (let [e (register! src (c/entity! ctx))] (c/claim! ctx e KIND (c/value! ctx "nil") tx) e)
+    ;; EDN `nil` must mint as the SYMBOL nil — beagle reads source `nil` via Racket's
+    ;; reader (no nil there), so the corpus convention is kind="symbol" v="nil"; the
+    ;; kind="nil" leaf means Racket '() and RENDERS as `()`, which the type-checker
+    ;; rejects ("unsupported expression: '()"). Same re-encoding rationale as the
+    ;; keyword branch below. (Found by the macro-crossover set-body probe, 2026-07-02.)
+    (nil? d)        (mint-leaf! src "symbol" "nil")
     (symbol? d)     (mint-leaf! src "symbol"  (str d))
     ;; A `:foo` token is a SYMBOL leaf with the colon RETAINED — beagle reads .bclj via
     ;; Racket's reader, which has no keyword syntax: `:enable`/`:-` come back as the symbol
@@ -941,7 +946,9 @@
     ;; it the beagle way here, or graph-authored typed defs never round-trip to text.
     (keyword? d)    (mint-leaf! src "symbol"  (str d))
     (string? d)     (mint-leaf! src "string"  d)
-    (boolean? d)    (mint-leaf! src "bool"    (if d "true" "false"))
+    ;; same convention: beagle source `true`/`false` read as SYMBOLS (the corpus has
+    ;; zero kind="bool" leaves) — mint them the way the reader does.
+    (boolean? d)    (mint-leaf! src "symbol"  (if d "true" "false"))
     (char? d)       (mint-leaf! src "char"    (str d))
     (number? d)     (mint-leaf! src "number"  (str d))
     (or (list? d) (seq? d) (vector? d) (map? d))
