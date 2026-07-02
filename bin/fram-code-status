@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# fram-code-status <dir> — flip-level detection for the graceful ladder (L0-L3).
+# Prints ONE machine-readable line on stdout and always exits 0. FAST (<100ms):
+# filesystem + a loopback port probe only — never racket/clojure/network.
+#
+# The ladder (documented in ~/code/STACK.md, announced by the session-start hook):
+#   level=3  flipped + warm coordinator ALIVE — graph-native authoring is live
+#   level=2  flipped (.fram/code.log + .mcp.json) but coordinator dead
+#            (fram-code-on <dir> re-warms it)
+#   level=1  Beagle sources present, not flipped (fram-code-on turns it on)
+#   level=0  no Beagle sources
+#
+# Output line (key=value, stable order):
+#   level=N src=<beagle file count> log=<code.log|-> claims=<n> mcp=present|absent
+#   port=<n|-> coord=alive|dead|- canonical=<registered claim-canonical files under dir>
+set -uo pipefail
+
+fallback() { echo "level=0 src=0 log=- claims=0 mcp=absent port=- coord=- canonical=0"; exit 0; }
+DIR="${1:-$PWD}"
+DIR="$(cd "$DIR" 2>/dev/null && pwd)" || fallback
+[ -n "$DIR" ] || fallback
+
+# --- Beagle sources (same extension set fram-code-on ingests) ----------------
+# In a git repo, ls-files (tracked + untracked-unignored) is the honest count:
+# it excludes gitignored build mirrors (gjoa: 515k-file engine/) and answers in
+# ms from the index. Elsewhere, a timeout-capped pruned find — a pathological
+# dir (/tmp, $HOME) must not blow the <100ms budget; a partial count still
+# detects L1 correctly.
+BEAGLE_EXT_RE='\.b(clj|cljs|js|nix|gl|sql|py|zig|odin)$'
+if git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  SRC_COUNT="$(timeout 0.5 git -C "$DIR" ls-files --cached --others --exclude-standard 2>/dev/null \
+               | grep -cE "$BEAGLE_EXT_RE")" || SRC_COUNT=0
+else
+  SRC_COUNT="$(timeout 0.5 find "$DIR" \
+    \( -name .git -o -name .fram -o -name .beagle -o -name .cache -o -name node_modules \
+       -o -name .direnv -o -name result \) -prune \
+    -o -type f -print 2>/dev/null | grep -cE "$BEAGLE_EXT_RE")" || SRC_COUNT=0
+fi
+
+# --- flip artifacts -----------------------------------------------------------
+CODE_LOG="$DIR/.fram/code.log"
+LOG="-" CLAIMS=0
+if [ -f "$CODE_LOG" ]; then
+  LOG="$CODE_LOG"
+  CLAIMS="$(wc -l <"$CODE_LOG" 2>/dev/null)" || CLAIMS=0
+fi
+MCP=absent
+# .mcp.json counts only if it actually wires the fram graph-edit server.
+[ -f "$DIR/.mcp.json" ] && grep -q '"fram"' "$DIR/.mcp.json" 2>/dev/null && MCP=present
+
+# --- coordinator port + liveness (probe only; no connection state kept) -------
+PORT="-" COORD="-"
+if [ "$MCP" = present ]; then
+  PORT="$(grep -oE '"FRAM_CODE_PORT"[^0-9]*[0-9]+' "$DIR/.mcp.json" 2>/dev/null \
+          | grep -oE '[0-9]+$' | head -1)" || true
+  [ -n "${PORT:-}" ] || PORT="-"
+fi
+port_listening() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q ":$1 "
+  else
+    timeout 0.2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null
+  fi
+}
+if [ -f "$CODE_LOG" ]; then
+  COORD=dead
+  if [ "$PORT" != "-" ]; then
+    port_listening "$PORT" && COORD=alive
+  else
+    # no port on record (hand-run daemon): fall back to the precise process match
+    pgrep -f "cnf_coord_daemon.clj serve-flat .*$CODE_LOG" >/dev/null 2>&1 && COORD=alive
+  fi
+fi
+
+# --- claim-canonical registry entries under this dir --------------------------
+REG="${CLAIM_CANONICAL_REGISTRY:-$HOME/.config/fram/claim-canonical-files}"
+CANON=0
+if [ -f "$REG" ]; then
+  CANON="$(awk -v d="$DIR/" '!/^[[:space:]]*#/ && index($0, d)==1 {n++} END{print n+0}' "$REG" 2>/dev/null)" || CANON=0
+fi
+
+# --- level --------------------------------------------------------------------
+LEVEL=0
+if [ -f "$CODE_LOG" ] && [ "$MCP" = present ]; then
+  if [ "$COORD" = alive ]; then LEVEL=3; else LEVEL=2; fi
+elif [ "${SRC_COUNT:-0}" -gt 0 ]; then
+  LEVEL=1
+fi
+
+echo "level=$LEVEL src=$SRC_COUNT log=$LOG claims=$CLAIMS mcp=$MCP port=$PORT coord=$COORD canonical=$CANON"
+exit 0
